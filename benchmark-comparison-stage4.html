@@ -10,7 +10,8 @@
   :root {
     --surface: #fffffe; --ink: #1c2126; --ink-2: #43494f; --ink-3: #7d838a;
     --hairline: #e6e7e9;
-    --line: #6e747b;          /* slope lines: thin but full-ink */
+    --line: #61676e;          /* slope lines: thin but full-ink */
+    --line-soft: #b3b8bd;     /* the normalized baseline */
     --accent: #3b6ea5;        /* the one accent: DuckLake, the flat-into-S3 arm */
   }
 
@@ -38,18 +39,30 @@
   svg text { font: 11px ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: var(--ink-2); }
   svg text.colhead { fill: var(--ink-3); letter-spacing: .08em; }
   svg text.focus { fill: var(--accent); font-weight: 600; }
-  svg polyline { fill: none; stroke: var(--line); stroke-width: 1.2; }
-  svg polyline.focus { stroke: var(--accent); stroke-width: 1.6; }
+  svg polyline { fill: none; stroke: var(--line); stroke-width: 1.3; }
+  svg polyline.focus { stroke: var(--accent); stroke-width: 1.7; }
+  svg polyline.soft { stroke: var(--line-soft); }
   svg circle { fill: var(--line); }
   svg circle.focus { fill: var(--accent); }
+  svg circle.soft { fill: var(--line-soft); }
+  svg text.soft { fill: var(--ink-3); }
 
   .fig-note { font-size: .76rem; color: var(--ink-3); margin: 2.2rem 0 0; max-width: 80ch; }
 
   .section-h { font-size: 1.05rem; font-weight: 650; margin: 3rem 0 .2rem; text-wrap: balance; }
   .section-sub { font-size: .78rem; color: var(--ink-2); margin: 0 0 .8rem; max-width: 80ch; }
-  #coldwarm svg { display: block; width: 100%; height: auto; }
-  .takeaway { color: var(--ink-2); max-width: 72ch; margin: 1rem 0 0; }
+  .takeaway { color: var(--ink-2); max-width: 72ch; margin: 1.2rem 0 0; }
   .takeaway .n { font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .grid2x2 { display: grid; grid-template-columns: 8rem repeat(2, minmax(11rem, 14rem));
+             margin: 1.2rem 0 0; }
+  .grid2x2 .cell { padding: .55rem 1rem .55rem 0; }
+  .grid2x2 .head { font-size: .72rem; letter-spacing: .06em; text-transform: uppercase;
+                   color: var(--ink-3); border-bottom: 1px solid var(--hairline); }
+  .grid2x2 .rowh { font-size: .78rem; color: var(--ink-2); align-self: end; }
+  .grid2x2 .big { display: block; font-size: 1.7rem; font-weight: 650;
+                  font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .grid2x2 small { color: var(--ink-3); font-size: .72rem; }
 
   details { margin-top: 2.8rem; }
   summary { cursor: pointer; font-size: .85rem; font-weight: 600; color: var(--ink-2);
@@ -113,11 +126,21 @@
 
   <h2 class="section-h">The key view: cold vs warm decides where the data lives</h2>
   <p class="section-sub">
-    The recommended path per query (its native wide layout), measured two ways: in ink, the wide
-    tables synced to the client's own NVMe; in blue, DuckLake on S3 queried from New York to Dublin.
-    Open marks are cold (fresh process, nothing cached); filled marks are warm. Log time.
+    Median p50 across the six queries, each on its native wide layout, run two ways: the wide
+    tables synced to the laptop's own NVMe, and DuckLake on S3 queried from New York to Dublin.
+    Small figures are the range across queries.
   </p>
-  <div id="coldwarm"></div>
+  <div class="grid2x2">
+    <div class="cell head"></div>
+    <div class="cell head">synced to laptop NVMe</div>
+    <div class="cell head">DuckLake on S3, NY → Dublin</div>
+    <div class="cell rowh">cold<br><small>fresh process</small></div>
+    <div class="cell"><span class="big mono">77 ms</span><small>65–112 ms</small></div>
+    <div class="cell"><span class="big mono">3.0 s</span><small>2.7–5.4 s</small></div>
+    <div class="cell rowh">warm</div>
+    <div class="cell"><span class="big mono">19 ms</span><small>11–21 ms</small></div>
+    <div class="cell"><span class="big mono">20 ms</span><small>16–27 ms</small></div>
+  </div>
   <p class="takeaway">
     Warm, location is irrelevant: the remote filled marks sit on top of the local ones
     (<span class="n">14–27 ms</span> either way — DuckLake plans locally and DuckDB caches the ranges).
@@ -134,12 +157,11 @@
   <div class="panels" id="panels"></div>
 
   <p class="fig-note">
-    Slopegraphs, log time scale, warm p50. Each line is one storage arm; blue marks the DuckLake
-    arms — the only lines that stay flat all the way from the laptop's NVMe to a bucket in Ireland.
-    Lines ending at the second column are the native-DuckDB arms, which exist only as a local file.
-    Left numbers: NY laptop NVMe; right numbers: NY → Dublin S3 with the ratio between the two —
-    the full cost of leaving the data an ocean away. Intermediate values and cold results are
-    tabled below.
+    Slopegraphs, log time scale, warm p50, three arms per query: blue — DuckLake on the query’s
+    native layout (the recommended path); dark — the same layout as plain Parquet, no catalog;
+    light — the normalized store, pivoted at query time. Flat is good: it means leaving the data
+    in Ireland costs nothing. The full seven-arm grid, including native-DuckDB tables and
+    wrong-layout cells, is in the tables below.
   </p>
 
   <details>
@@ -193,38 +215,38 @@ function spread(ys, gap, lo, hi) {
   return out;
 }
 
-const W = 590, H = 230, PAD = 26;
-const X = [172, 292, 388, 484], XR = 494;   // env columns; right-label anchor
+const W = 590, H = 175, PAD = 26;
+const X = [172, 292, 388, 484], XR = 494;
 const panels = document.getElementById("panels");
-
+const SERIES = [
+  { key: "ducklake", cls: "focus" },
+  { key: "parquet",  cls: "" },
+  { key: "normalized", cls: "soft" },
+];
 for (const [qid, desc] of QUERIES) {
-  const rows = ARMS.map(a => ({ arm: a, w: DATA[`${qid}/${a}`].w,
-                                focus: a.startsWith("ducklake") }));
-  const vals = rows.flatMap(r => r.w.filter(v => v != null));
+  const rl = qid.startsWith("CS") ? "cs" : "ts";   // the query's native layout
+  const rows = SERIES.map(sr => ({ ...sr,
+    w: sr.key === "normalized" ? DATA[`${qid}/normalized`].w
+     : sr.key === "ducklake" ? DATA[`${qid}/ducklake_${rl}`].w
+     : DATA[`${qid}/wide_${rl}`].w }));
+  const vals = rows.flatMap(r => r.w);
   const [lo, hi] = [Math.min(...vals), Math.max(...vals)];
   const y = v => PAD + (1 - (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo) || 1)) * (H - 2*PAD);
-
-  const leftY = spread(rows.map(r => y(r.w[0])), 13, PAD - 8, H - 6);
-  const lastIdx = w => w.length - 1 - [...w].reverse().findIndex(v => v != null);
-  const rightY = spread(rows.map(r => y(r.w[lastIdx(r.w)])), 13, PAD - 8, H - 6);
+  const leftY = spread(rows.map(r => y(r.w[0])), 14, PAD - 8, H - 6);
+  const rightY = spread(rows.map(r => y(r.w[3])), 14, PAD - 8, H - 6);
 
   let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${qid} warm times across environments">`;
   ["NY NVME","EC2 NVME","EC2·S3","NY→DUBLIN"].forEach((h, k) => {
     svg += `<text class="colhead" x="${X[k]}" y="12" text-anchor="middle">${h}</text>`; });
   rows.forEach((r, i) => {
-    const cls = r.focus ? "focus" : "";
-    const pts = r.w.map((v, k) => v == null ? null : `${X[k]},${y(v).toFixed(1)}`)
-                   .filter(Boolean).join(" ");
-    svg += `<polyline class="${cls}" points="${pts}"><title>${r.arm} · ${qid}: `
+    const pts = r.w.map((v, k) => `${X[k]},${y(v).toFixed(1)}`).join(" ");
+    svg += `<polyline class="${r.cls}" points="${pts}"><title>${r.key} · ${qid}: `
          + `${r.w.map(fmtS).join(" → ")}</title></polyline>`;
-    r.w.forEach((v, k) => { if (v != null)
-      svg += `<circle class="${cls}" cx="${X[k]}" cy="${y(v).toFixed(1)}" r="2"></circle>`; });
-    svg += `<text class="${cls}" x="${X[0]-8}" y="${(leftY[i]+3.5).toFixed(1)}" text-anchor="end">`
-         + `${r.arm}  ${fmtS(r.w[0])}</text>`;
-    const li = lastIdx(r.w);
-    const tag = li < 2 ? " (EC2)" : ` ${(r.w[li]/r.w[0]).toFixed(1)}×`;
-    svg += `<text class="${cls}" x="${(li === X.length - 1 ? XR : X[li]) + 8}" `
-         + `y="${(rightY[i]+3.5).toFixed(1)}">${fmtS(r.w[li])}${tag}</text>`;
+    r.w.forEach((v, k) => {
+      svg += `<circle class="${r.cls}" cx="${X[k]}" cy="${y(v).toFixed(1)}" r="2"></circle>`; });
+    svg += `<text class="${r.cls}" x="${X[0]-8}" y="${(leftY[i]+3.5).toFixed(1)}" text-anchor="end">`
+         + `${r.key}  ${fmtS(r.w[0])}</text>`
+         + `<text class="${r.cls}" x="${XR + 8}" y="${(rightY[i]+3.5).toFixed(1)}">${fmtS(r.w[3])}</text>`;
   });
   svg += `</svg>`;
 
@@ -246,48 +268,6 @@ function table(el, field) {
 table(document.getElementById("warm-table"), "w");
 table(document.getElementById("cold-table"), "c");
 
-// ---- Key view: cold vs warm on the right-layout path, local vs NY->Dublin.
-// [localCold, localWarm, remoteCold, remoteWarm]; local = wide Parquet on the
-// client's NVMe (what a sync gives you), remote = DuckLake on S3 from NY.
-const CW = {
-  CS1: [0.0683, 0.0151, 2.7055, 0.0194],
-  CS2: [0.0648, 0.0111, 3.1353, 0.0197],
-  CS3: [0.1029, 0.0205, 3.9696, 0.0270],
-  TS1: [0.0766, 0.0187, 2.8848, 0.0207],
-  TS2: [0.1116, 0.0206, 2.7256, 0.0173],
-  TS3: [0.0776, 0.0189, 5.3994, 0.0159],
-};
-(function keyview() {
-  const qids = Object.keys(CW);
-  const KW = 960, ROW = 36, TOP = 30, BOT = 34, X0 = 70, X1 = 850;
-  const KH = TOP + qids.length * ROW + BOT;
-  const lo = 0.009, hi = 7;
-  const x = v => X0 + (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) * (X1 - X0);
-  const ink = "var(--line)", blue = "var(--accent)";
-
-  let s = `<svg viewBox="0 0 ${KW} ${KH}" role="img" aria-label="cold vs warm, local vs remote">`;
-  for (const [v, lab] of [[0.01, "10 ms"], [0.1, "100 ms"], [1, "1 s"], [5, "5 s"]]) {
-    s += `<line x1="${x(v)}" y1="${KH - BOT + 2}" x2="${x(v)}" y2="${KH - BOT + 7}" stroke="var(--hairline)"/>`
-       + `<text x="${x(v)}" y="${KH - BOT + 19}" text-anchor="middle" fill="var(--ink-3)">${lab}</text>`;
-  }
-  qids.forEach((q, i) => {
-    const [lc, lw, rc, rw] = CW[q];
-    const yl = TOP + i * ROW + 12, yr = yl + 10;   // local lane above, remote lane below
-    s += `<text x="${X0 - 14}" y="${yl + 9}" text-anchor="end" fill="var(--ink)">${q}</text>`;
-    s += `<line x1="${x(lw)}" y1="${yl}" x2="${x(lc)}" y2="${yl}" stroke="${ink}" stroke-width="1"/>`
-       + `<line x1="${x(rw)}" y1="${yr}" x2="${x(rc)}" y2="${yr}" stroke="${blue}" stroke-width="1"/>`
-       + `<circle cx="${x(lc)}" cy="${yl}" r="3.5" fill="var(--surface)" stroke="${ink}" stroke-width="1.6"><title>${q} local cold ${fmtS(lc)}</title></circle>`
-       + `<circle cx="${x(lw)}" cy="${yl}" r="3" fill="${ink}"><title>${q} local warm ${fmtS(lw)}</title></circle>`
-       + `<circle cx="${x(rc)}" cy="${yr}" r="3.5" fill="var(--surface)" stroke="${blue}" stroke-width="1.6"><title>${q} remote cold ${fmtS(rc)}</title></circle>`
-       + `<circle cx="${x(rw)}" cy="${yr}" r="3" fill="${blue}"><title>${q} remote warm ${fmtS(rw)}</title></circle>`
-       + `<text x="${x(rc) + 10}" y="${yr + 4}" fill="${blue}">${fmtS(rc)} cold, remote</text>`
-       + `<text x="${x(lc) + 10}" y="${yl + 4}" fill="var(--ink-3)">${fmtS(lc)}</text>`;
-  });
-  const [, lw0, , rw0] = CW[qids[0]];
-  s += `<text x="${x(Math.min(lw0, rw0)) - 10}" y="${TOP + 12 + 4}" text-anchor="end" fill="var(--ink-3)">warm, both</text>`;
-  s += `</svg>`;
-  document.getElementById("coldwarm").innerHTML = s;
-})();
 </script>
 </body>
 </html>
