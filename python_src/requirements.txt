@@ -1,0 +1,4 @@
+numpy>=2.0
+pyarrow>=17.0
+duckdb>=1.0
+polars>=1.0

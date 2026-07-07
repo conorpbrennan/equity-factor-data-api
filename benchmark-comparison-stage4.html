@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Factor store benchmark — dev box, EC2, S3, and remote client</title>
+<style>
+  /* Single light theme, deliberately: Tufte's paper — light ground, dark ink,
+     every drop of ink carrying data. */
+  :root {
+    --surface: #fffffe; --ink: #1c2126; --ink-2: #43494f; --ink-3: #7d838a;
+    --hairline: #e6e7e9;
+    --line: #6e747b;          /* slope lines: thin but full-ink */
+    --accent: #3b6ea5;        /* the one accent: DuckLake, the flat-into-S3 arm */
+  }
+
+  body { background: var(--surface); color: var(--ink); margin: 0;
+         padding: 3.5rem 1.5rem 4rem;
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; }
+  main { max-width: 1040px; margin: 0 auto; }
+
+  .eyebrow { font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+             color: var(--ink-3); margin: 0 0 .6rem; }
+  h1 { font-size: 1.55rem; font-weight: 650; margin: 0 0 .45rem; text-wrap: balance; }
+  .context { color: var(--ink-2); max-width: 72ch; margin: 0; }
+
+  .summary { margin: 2.6rem 0 3rem; max-width: 72ch; }
+  .summary p { margin: .55rem 0; color: var(--ink-2); }
+  .summary .n { font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+            gap: 3rem 4rem; }
+  @media (max-width: 530px) { .panels { grid-template-columns: 1fr; } }
+  .panel h2 { font-size: .92rem; font-weight: 650; margin: 0 0 .1rem; }
+  .panel .sub { font-size: .78rem; color: var(--ink-2); margin: 0 0 .5rem; }
+  .panel svg { display: block; width: 100%; height: auto; }
+  svg text { font: 11px ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: var(--ink-2); }
+  svg text.colhead { fill: var(--ink-3); letter-spacing: .08em; }
+  svg text.focus { fill: var(--accent); font-weight: 600; }
+  svg polyline { fill: none; stroke: var(--line); stroke-width: 1.2; }
+  svg polyline.focus { stroke: var(--accent); stroke-width: 1.6; }
+  svg circle { fill: var(--line); }
+  svg circle.focus { fill: var(--accent); }
+
+  .fig-note { font-size: .76rem; color: var(--ink-3); margin: 2.2rem 0 0; max-width: 80ch; }
+
+  details { margin-top: 2.8rem; }
+  summary { cursor: pointer; font-size: .85rem; font-weight: 600; color: var(--ink-2);
+            list-style-position: outside; }
+  summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .tablewrap { overflow-x: auto; margin-top: 1rem; }
+  table { border-collapse: collapse; font-size: .78rem; font-variant-numeric: tabular-nums;
+          min-width: 720px; }
+  th, td { text-align: right; padding: .32rem 1rem .32rem 0; }
+  thead th { color: var(--ink-3); font-weight: 500; font-size: .7rem; letter-spacing: .06em;
+             text-transform: uppercase; border-bottom: 1px solid var(--hairline); }
+  tbody tr:nth-child(7n) td { border-bottom: 1px solid var(--hairline); }
+  th:nth-child(-n+2), td:nth-child(-n+2) { text-align: left; }
+  td { color: var(--ink-2); } td:first-child { color: var(--ink); }
+
+  footer { margin-top: 3.2rem; font-size: .78rem; color: var(--ink-2); max-width: 80ch; }
+  footer p { margin: .45rem 0; }
+</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Equity factor data API · Stage 4 · 2026-07-08</p>
+  <h1>Same benchmark, four places: dev NVMe, EC2 NVMe, EC2 → S3, dev → S3</h1>
+  <p class="context">
+    One grid (model <span class="mono">BARRA_USE4_L</span>, six queries, seven storage arms), four
+    environments: this dev box on its own NVMe; <span class="mono">r7gd.2xlarge</span>
+    (8 Graviton3 cores) on instance-store NVMe; the same instance reading Parquet from S3 in-region;
+    and the dev box reading the same S3 data over the public internet — the remote-research pattern.
+    Data regenerated on the instance from seed — byte-identical by construction.
+  </p>
+
+  <div class="summary">
+    <p>Moving to EC2 costs a flat <span class="n">1.70×</span> warm (median across all cells) — core
+       count, nothing structural: every layout conclusion from the local benchmark holds unchanged.</p>
+    <p>Moving the data from instance NVMe to in-region S3 costs <span class="n">+9%</span> warm at the
+       median. DuckLake is flat — <span class="n">≈1.0×</span> — because its catalog already knows every
+       file and byte range; plain Parquet reading pays up to <span class="n">4.5×</span> on small pruned
+       queries, which are round-trip-bound.</p>
+    <p>Cold is where S3 bites: <span class="n">0.3–0.5 s</span> of connection and footer discovery
+       before the first byte, and unpruned scans stream the whole store at ~400 MB/s — the worst cold
+       cell from inside AWS is <span class="n">5.6 s</span>.</p>
+    <p>From the dev box over the internet, DuckLake warm queries run at <span class="n">14–27 ms</span> —
+       indistinguishable from local NVMe. Plain Parquet reading pays <span class="n">~30×</span> for the
+       same queries (0.3–0.8 s): S3 listing and footer round trips at internet latency, exactly the
+       degradation the catalog exists to remove. Cold full-store scans cost <span class="n">~50 s</span>
+       at this downlink — the case for syncing, or for never querying the wrong layout remotely.</p>
+  </div>
+
+  <div class="panels" id="panels"></div>
+
+  <p class="fig-note">
+    Slopegraphs, log time scale, warm p50. Each line is one storage arm; blue marks the DuckLake
+    arms — the only lines that stay flat all the way from local NVMe to internet-remote S3. Lines
+    ending at the second column are the native-DuckDB arms, which exist only as a local file.
+    Left numbers: dev box NVMe; right numbers: dev box → S3 with the ratio between the two — the
+    full cost of leaving the data in the cloud. Intermediate values and cold results are tabled below.
+  </p>
+
+  <details>
+    <summary>Warm p50, all values (seconds; dev NVMe / EC2 NVMe / EC2·S3 / dev·S3)</summary>
+    <div class="tablewrap"><table id="warm-table"></table></div>
+  </details>
+  <details>
+    <summary>Cold p50 — fresh process, cache evicted (seconds; dev NVMe / EC2 NVMe / EC2·S3 / dev·S3)</summary>
+    <div class="tablewrap"><table id="cold-table"></table></div>
+  </details>
+
+  <footer>
+    <p><strong>Metric.</strong> Time to a usable Polars DataFrame; identical harness, parameters,
+       and protocol in all four environments. Bytes-read accounting
+       covers the NVMe grids only (httpfs traffic arrives over sockets, invisible to rchar); the
+       Stage-3 pruning figures — megabytes for right-layout queries, the full ~1.4 GB store for
+       wrong-layout ones — describe what S3 serves, since the plans are identical.</p>
+    <p><strong>Sources.</strong> <span class="mono">data/benchmark/summary.json</span> ·
+       <span class="mono">s3://…/results/ec2_local</span> · <span class="mono">s3://…/results/ec2_s3</span> ·
+       <span class="mono">data/benchmark_s3/summary.json</span> (dev → S3: 3 cold / 3 warm iterations;
+       the others 5 / 10). Markdown twin: <span class="mono">benchmark-comparison-stage4.md</span>.</p>
+  </footer>
+</main>
+
+<script>
+const DATA = {"CS1/normalized":{"w":[0.0843,0.1344,0.1951,0.7211],"c":[0.1504,0.225,0.812,5.931]},"CS1/wide_cs":{"w":[0.0151,0.0263,0.0705,0.5229],"c":[0.0683,0.1029,0.3426,2.6587]},"CS1/wide_ts":{"w":[0.1909,0.3654,0.3737,0.4699],"c":[0.3224,1.9439,3.2378,46.6549]},"CS1/duckdb_cs":{"w":[0.0062,0.0077,null,null],"c":[0.0729,0.102,null,null]},"CS1/duckdb_ts":{"w":[0.0228,0.0453,null,null],"c":[0.1926,0.939,null,null]},"CS1/ducklake_cs":{"w":[0.0189,0.0243,0.0242,0.0194],"c":[0.1137,0.1652,0.4081,2.7055]},"CS1/ducklake_ts":{"w":[0.1347,0.1322,0.1177,0.1307],"c":[0.3528,2.035,2.7741,43.9666]},"CS2/normalized":{"w":[0.0222,0.0384,0.0996,0.6469],"c":[0.0814,0.1158,0.8437,7.2908]},"CS2/wide_cs":{"w":[0.0111,0.0207,0.0931,0.8133],"c":[0.0648,0.0944,0.5115,4.1937]},"CS2/wide_ts":{"w":[0.0611,0.133,0.1893,0.713],"c":[0.2615,0.6744,2.4565,28.3093]},"CS2/duckdb_cs":{"w":[0.0026,0.0033,null,null],"c":[0.0594,0.0881,null,null]},"CS2/duckdb_ts":{"w":[0.0088,0.0159,null,null],"c":[0.1151,0.1967,null,null]},"CS2/ducklake_cs":{"w":[0.0145,0.0171,0.0187,0.0197],"c":[0.1095,0.1731,0.4688,3.1353]},"CS2/ducklake_ts":{"w":[0.049,0.0418,0.0389,0.0494],"c":[0.319,0.7013,1.906,22.3362]},"CS3/normalized":{"w":[0.0936,0.1439,0.2386,1.0464],"c":[0.1706,0.2376,1.0599,8.3251]},"CS3/wide_cs":{"w":[0.0205,0.0373,0.1141,0.8297],"c":[0.1029,0.1316,0.5968,4.8731]},"CS3/wide_ts":{"w":[0.1951,0.3747,0.4098,0.7768],"c":[0.3419,1.9417,3.474,49.6384]},"CS3/duckdb_cs":{"w":[0.0064,0.0094,null,null],"c":[0.0767,0.1031,null,null]},"CS3/duckdb_ts":{"w":[0.024,0.0468,null,null],"c":[0.1995,0.9528,null,null]},"CS3/ducklake_cs":{"w":[0.0242,0.0311,0.0291,0.027],"c":[0.1492,0.1821,0.5313,3.9696]},"CS3/ducklake_ts":{"w":[0.1418,0.1386,0.1255,0.1321],"c":[0.3862,2.0398,2.8714,43.8258]},"TS1/normalized":{"w":[0.9208,1.889,1.8037,1.4667],"c":[1.0624,2.0384,4.8158,49.0945]},"TS1/wide_cs":{"w":[0.2194,0.5209,0.5348,0.8243],"c":[0.3524,2.0213,5.6063,55.9539]},"TS1/wide_ts":{"w":[0.0187,0.031,0.0632,0.3093],"c":[0.0766,0.1151,0.3906,3.2861]},"TS1/duckdb_cs":{"w":[0.1213,0.2058,null,null],"c":[0.2901,1.3625,null,null]},"TS1/duckdb_ts":{"w":[0.0071,0.0084,null,null],"c":[0.0724,0.0949,null,null]},"TS1/ducklake_cs":{"w":[0.1825,0.2486,0.2235,0.1783],"c":[0.4121,2.2766,3.8425,45.8418]},"TS1/ducklake_ts":{"w":[0.0171,0.0209,0.0236,0.0207],"c":[0.108,0.1584,0.3988,2.8848]},"TS2/normalized":{"w":[0.1233,0.2601,0.2747,0.4389],"c":[0.1982,0.3639,1.1808,16.2608]},"TS2/wide_cs":{"w":[0.0358,0.066,0.1098,0.543],"c":[0.1235,0.1676,1.648,7.4141]},"TS2/wide_ts":{"w":[0.0206,0.0354,0.0679,0.3457],"c":[0.1116,0.1306,1.0122,9.7454]},"TS2/duckdb_cs":{"w":[0.009,0.0153,null,null],"c":[0.0798,0.1178,null,null]},"TS2/duckdb_ts":{"w":[0.0067,0.0083,null,null],"c":[0.0663,0.092,null,null]},"TS2/ducklake_cs":{"w":[0.025,0.0339,0.0341,0.0245],"c":[0.151,0.1928,0.8317,7.3214]},"TS2/ducklake_ts":{"w":[0.0185,0.0236,0.0241,0.0173],"c":[0.113,0.1602,0.3771,2.7256]},"TS3/normalized":{"w":[0.0185,0.0455,0.0761,0.3416],"c":[0.0764,0.1294,0.7458,6.2625]},"TS3/wide_cs":{"w":[0.0191,0.0457,0.0746,0.3263],"c":[0.0759,0.13,0.6897,5.3058]},"TS3/wide_ts":{"w":[0.0189,0.0459,0.0688,0.3083],"c":[0.0776,0.1309,0.6885,6.7582]},"TS3/duckdb_cs":{"w":[0.0059,0.0108,null,null],"c":[0.0798,0.1083,null,null]},"TS3/duckdb_ts":{"w":[0.0058,0.0108,null,null],"c":[0.0791,0.1085,null,null]},"TS3/ducklake_cs":{"w":[0.0147,0.0235,0.0214,0.0142],"c":[0.1104,0.1764,1.3519,5.4158]},"TS3/ducklake_ts":{"w":[0.0144,0.0239,0.0224,0.0159],"c":[0.1147,0.1742,1.3393,5.3994]}};
+
+const ARMS = ["normalized","wide_cs","wide_ts","duckdb_cs","duckdb_ts","ducklake_cs","ducklake_ts"];
+const QUERIES = [
+  ["CS1","full cross-section — one date, all factors + specific risk"],
+  ["CS2","one date, 5 factors, estimation universe only"],
+  ["CS3","everything for B·F·Bᵀ + D"],
+  ["TS1","one asset’s history — 20 years, all factors"],
+  ["TS2","mixed — 100 assets × 5 years × 3 factors"],
+  ["TS3","one covariance pair, 20 years"],
+];
+const fmtS = s => s == null ? "—" : s < 0.0995 ? (s*1000).toFixed(0)+" ms" : s.toFixed(2)+" s";
+
+// Push label y-positions apart (min gap), keep within [lo, hi].
+function spread(ys, gap, lo, hi) {
+  const order = ys.map((y, i) => [y, i]).sort((a, b) => a[0] - b[0]);
+  const pos = order.map(o => o[0]);
+  for (let i = 0; i < pos.length; i++) pos[i] = Math.max(pos[i], lo, i ? pos[i-1] + gap : lo);
+  const over = pos[pos.length-1] - hi;
+  if (over > 0) {
+    pos[pos.length-1] = hi;
+    for (let i = pos.length - 2; i >= 0; i--) pos[i] = Math.min(pos[i], pos[i+1] - gap);
+  }
+  const out = new Array(ys.length);
+  order.forEach(([_, idx], rank) => out[idx] = pos[rank]);
+  return out;
+}
+
+const W = 590, H = 230, PAD = 26;
+const X = [172, 292, 388, 484], XR = 494;   // env columns; right-label anchor
+const panels = document.getElementById("panels");
+
+for (const [qid, desc] of QUERIES) {
+  const rows = ARMS.map(a => ({ arm: a, w: DATA[`${qid}/${a}`].w,
+                                focus: a.startsWith("ducklake") }));
+  const vals = rows.flatMap(r => r.w.filter(v => v != null));
+  const [lo, hi] = [Math.min(...vals), Math.max(...vals)];
+  const y = v => PAD + (1 - (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo) || 1)) * (H - 2*PAD);
+
+  const leftY = spread(rows.map(r => y(r.w[0])), 13, PAD - 8, H - 6);
+  const lastIdx = w => w.length - 1 - [...w].reverse().findIndex(v => v != null);
+  const rightY = spread(rows.map(r => y(r.w[lastIdx(r.w)])), 13, PAD - 8, H - 6);
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${qid} warm times across environments">`;
+  ["DEV NVME","EC2 NVME","EC2·S3","DEV·S3"].forEach((h, k) => {
+    svg += `<text class="colhead" x="${X[k]}" y="12" text-anchor="middle">${h}</text>`; });
+  rows.forEach((r, i) => {
+    const cls = r.focus ? "focus" : "";
+    const pts = r.w.map((v, k) => v == null ? null : `${X[k]},${y(v).toFixed(1)}`)
+                   .filter(Boolean).join(" ");
+    svg += `<polyline class="${cls}" points="${pts}"><title>${r.arm} · ${qid}: `
+         + `${r.w.map(fmtS).join(" → ")}</title></polyline>`;
+    r.w.forEach((v, k) => { if (v != null)
+      svg += `<circle class="${cls}" cx="${X[k]}" cy="${y(v).toFixed(1)}" r="2"></circle>`; });
+    svg += `<text class="${cls}" x="${X[0]-8}" y="${(leftY[i]+3.5).toFixed(1)}" text-anchor="end">`
+         + `${r.arm}  ${fmtS(r.w[0])}</text>`;
+    const li = lastIdx(r.w);
+    const tag = li < 2 ? " (EC2)" : ` ${(r.w[li]/r.w[0]).toFixed(1)}×`;
+    svg += `<text class="${cls}" x="${(li === X.length - 1 ? XR : X[li]) + 8}" `
+         + `y="${(rightY[i]+3.5).toFixed(1)}">${fmtS(r.w[li])}${tag}</text>`;
+  });
+  svg += `</svg>`;
+
+  const panel = document.createElement("section");
+  panel.className = "panel";
+  panel.innerHTML = `<h2><span class="mono">${qid}</span></h2><p class="sub">${desc}</p>${svg}`;
+  panels.appendChild(panel);
+}
+
+function table(el, field) {
+  let html = "<thead><tr><th>query</th><th>arm</th><th>dev NVMe</th><th>EC2 NVMe</th><th>EC2 · S3</th><th>dev · S3</th></tr></thead><tbody>";
+  for (const [qid] of QUERIES) for (const arm of ARMS) {
+    const vals = DATA[`${qid}/${arm}`][field];
+    html += `<tr><td>${qid}</td><td class="mono">${arm}</td>`
+          + vals.map(v => `<td class="mono">${v == null ? "—" : v.toFixed(3)}</td>`).join("") + "</tr>";
+  }
+  el.innerHTML = html + "</tbody>";
+}
+table(document.getElementById("warm-table"), "w");
+table(document.getElementById("cold-table"), "c");
+</script>
+</body>
+</html>
