@@ -99,8 +99,11 @@ TS1       2180ms      18ms     5,218
 TS2       2523ms      17ms   130,500
 ```
 
-First touch of each table pays S3 latency; repeats run at local-NVMe speed
-because the catalog plans everything locally — only data bytes cross the wire.
+The suite runs twice — once per risk model (Barra- and Axioma-style, each
+with its own wide schema and factor taxonomy; model selection is table
+selection, e.g. `cs_wide` vs `cs_wide_axioma`). First touch of each table
+pays S3 latency; repeats run at local-NVMe speed because the catalog plans
+everything locally — only data bytes cross the wire.
 The catalog is cached at `~/.cache/factor-store/` and re-downloaded each run;
 a shared-Postgres catalog (the deferred multi-reader arm) removes that step.
 
