@@ -103,3 +103,10 @@ First touch of each table pays S3 latency; repeats run at local-NVMe speed
 because the catalog plans everything locally — only data bytes cross the wire.
 The catalog is cached at `~/.cache/factor-store/` and re-downloaded each run;
 a shared-Postgres catalog (the deferred multi-reader arm) removes that step.
+
+Warm repeats are served by DuckDB's external file cache: fetched S3 ranges
+live in the buffer pool, capped by `memory_limit` (default 80% of RAM) with
+LRU eviction — ample for the whole hot dataset. Inspect it with
+`SELECT * FROM duckdb_external_file_cache()`; flush it with
+`SET enable_external_file_cache = false` (instant, verified); it is
+per-process, so every new session starts cold.

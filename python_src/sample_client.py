@@ -5,8 +5,9 @@ The remote-research pattern from the benchmark, end to end:
   1. download the DuckLake catalog file from S3 (4.5 MB — the entire
      metadata layer: tables, snapshots, data-file list, per-file column stats);
   2. attach it read-only in DuckDB;
-  3. run the six benchmark queries against the right layout for each,
-     printing first-run and repeat timings.
+  3. run the six benchmark queries against the right layout for each —
+     for BOTH risk models (Barra- and Axioma-style, each with its own wide
+     schema and factor taxonomy) — printing first-run and repeat timings.
 
 Everything data-sized stays in S3; DuckDB range-reads only the bytes each
 query needs, planned from the local catalog with zero S3 metadata round trips.
@@ -38,12 +39,11 @@ CATALOG_KEY = "results/ec2_s3/catalog.ducklake"
 REGION = "eu-west-1"
 CATALOG_LOCAL = Path.home() / ".cache" / "factor-store" / "catalog.ducklake"
 
-# Frozen benchmark parameters (see data/benchmark/manifest.json)
+# Frozen benchmark parameters (see data/benchmark/manifest.json). Factor
+# identity is model-scoped — "MOMENTUM" and "MT_MOMENTUM" are different
+# factors — and so is coverage, hence per-model TS1 assets.
 CS_DATE = "2016-06-15"
-FIVE_FACTORS = ("BETA", "MOMENTUM", "SIZE", "EARNYLD", "RESVOL")
-TS_ASSET = 21
 TS2_RANGE = ("2018-01-01", "2022-12-31")
-TS2_FACTORS = ("MOMENTUM", "EARNYLD", "GROWTH")
 TS2_ASSETS = (4, 9, 12, 15, 16, 17, 18, 19, 20, 21, 27, 28, 29, 30, 31, 35, 41,
               44, 47, 54, 58, 60, 61, 66, 71, 72, 75, 76, 81, 83, 85, 88, 89,
               96, 97, 98, 102, 106, 110, 113, 114, 115, 116, 121, 123, 124,
@@ -52,42 +52,60 @@ TS2_ASSETS = (4, 9, 12, 15, 16, 17, 18, 19, 20, 21, 27, 28, 29, 30, 31, 35, 41,
               212, 213, 215, 219, 222, 223, 227, 232, 239, 240, 241, 247, 248,
               250, 253, 258, 260, 262, 263, 264, 266, 270, 271, 277, 278, 280,
               282, 288)
-COV_PAIR = ("BETA", "MOMENTUM")
 
-_five = ", ".join(f'"{f}"' for f in FIVE_FACTORS)
-_ts2f = ", ".join(f'"{f}"' for f in TS2_FACTORS)
-_ids = ", ".join(map(str, TS2_ASSETS))
-
-# Each query hits the layout built for it: cs_wide is date-major (monthly
-# partitions), ts_wide is asset-major (buckets); covariance is shared.
-# CS3 is two result sets — everything needed for B·F·Bᵀ + D on one date.
-QUERIES: dict[str, tuple[str, list[str]]] = {
-    "CS1": ("full cross-section, one date, all factors", [
-        f"SELECT * FROM dl.cs_wide WHERE cob_date = DATE '{CS_DATE}' ORDER BY asset_id"]),
-    "CS2": ("one date, 5 factors, estimation universe only", [f"""
-        SELECT w.asset_id, {_five}
-        FROM dl.cs_wide w
-        JOIN dl.membership u
-          ON u.cob_date = w.cob_date AND u.asset_id = w.asset_id
-         AND u.estimation_universe_flag
-        WHERE w.cob_date = DATE '{CS_DATE}' ORDER BY w.asset_id"""]),
-    "CS3": ("cross-section + covariance + specific risk (B·F·Bᵀ + D)", [
-        f"SELECT * FROM dl.cs_wide WHERE cob_date = DATE '{CS_DATE}' ORDER BY asset_id",
-        f"SELECT factor_id_1, factor_id_2, value FROM dl.covariance "
-        f"WHERE cob_date = DATE '{CS_DATE}'"]),
-    "TS1": ("one asset, 20 years, all factors", [
-        f"SELECT * FROM dl.ts_wide WHERE asset_id = {TS_ASSET} ORDER BY cob_date"]),
-    "TS2": ("100 assets, 5 years, 3 factors (mixed)", [f"""
-        SELECT cob_date, asset_id, {_ts2f}
-        FROM dl.ts_wide
-        WHERE asset_id IN ({_ids})
-          AND cob_date BETWEEN DATE '{TS2_RANGE[0]}' AND DATE '{TS2_RANGE[1]}'
-        ORDER BY asset_id, cob_date"""]),
-    "TS3": ("one covariance pair, 20 years", [
-        f"SELECT cob_date, value FROM dl.covariance "
-        f"WHERE factor_id_1 = '{COV_PAIR[0]}' AND factor_id_2 = '{COV_PAIR[1]}' "
-        f"ORDER BY cob_date"]),
+MODELS = {
+    "BARRA_USE4_L": {
+        "suffix": "",              # table names: cs_wide, ts_wide, ...
+        "five": ("BETA", "MOMENTUM", "SIZE", "EARNYLD", "RESVOL"),
+        "ts_asset": 21,
+        "ts2_factors": ("MOMENTUM", "EARNYLD", "GROWTH"),
+        "cov_pair": ("BETA", "MOMENTUM"),
+    },
+    "AXIOMA_US4_MH": {
+        "suffix": "_axioma",       # cs_wide_axioma, ts_wide_axioma, ...
+        "five": ("MARKET_SENSITIVITY", "MT_MOMENTUM", "ST_MOMENTUM", "SIZE", "VALUE"),
+        "ts_asset": 12,            # asset 21 is not in Axioma's coverage universe
+        "ts2_factors": ("MT_MOMENTUM", "SIZE", "GROWTH"),
+        "cov_pair": ("MARKET_SENSITIVITY", "MT_MOMENTUM"),
+    },
 }
+
+
+def make_queries(m: dict) -> dict[str, tuple[str, list[str]]]:
+    """The six benchmark queries against one model's tables. Each hits the
+    layout built for it: cs_wide* is date-major, ts_wide* asset-major;
+    CS3 is two result sets — everything for B·F·Bᵀ + D on one date."""
+    sx = m["suffix"]
+    five = ", ".join(f'"{f}"' for f in m["five"])
+    ts2f = ", ".join(f'"{f}"' for f in m["ts2_factors"])
+    ids = ", ".join(map(str, TS2_ASSETS))
+    f1, f2 = m["cov_pair"]
+    return {
+        "CS1": ("full cross-section, one date, all factors", [
+            f"SELECT * FROM dl.cs_wide{sx} WHERE cob_date = DATE '{CS_DATE}' ORDER BY asset_id"]),
+        "CS2": ("one date, 5 factors, estimation universe only", [f"""
+            SELECT w.asset_id, {five}
+            FROM dl.cs_wide{sx} w
+            JOIN dl.membership{sx} u
+              ON u.cob_date = w.cob_date AND u.asset_id = w.asset_id
+             AND u.estimation_universe_flag
+            WHERE w.cob_date = DATE '{CS_DATE}' ORDER BY w.asset_id"""]),
+        "CS3": ("cross-section + covariance + specific risk (B·F·Bᵀ + D)", [
+            f"SELECT * FROM dl.cs_wide{sx} WHERE cob_date = DATE '{CS_DATE}' ORDER BY asset_id",
+            f"SELECT factor_id_1, factor_id_2, value FROM dl.covariance{sx} "
+            f"WHERE cob_date = DATE '{CS_DATE}'"]),
+        "TS1": ("one asset, 20 years, all factors", [
+            f"SELECT * FROM dl.ts_wide{sx} WHERE asset_id = {m['ts_asset']} ORDER BY cob_date"]),
+        "TS2": ("100 assets, 5 years, 3 factors (mixed)", [f"""
+            SELECT cob_date, asset_id, {ts2f}
+            FROM dl.ts_wide{sx}
+            WHERE asset_id IN ({ids})
+              AND cob_date BETWEEN DATE '{TS2_RANGE[0]}' AND DATE '{TS2_RANGE[1]}'
+            ORDER BY asset_id, cob_date"""]),
+        "TS3": ("one covariance pair, 20 years", [
+            f"SELECT cob_date, value FROM dl.covariance{sx} "
+            f"WHERE factor_id_1 = '{f1}' AND factor_id_2 = '{f2}' ORDER BY cob_date"]),
+    }
 
 
 def fetch_catalog() -> None:
@@ -134,12 +152,17 @@ def run_query(con: duckdb.DuckDBPyConnection, sqls: list[str]) -> tuple[float, i
 def main() -> None:
     fetch_catalog()
     con = connect()
-    print(f"{'query':<6} {'first':>9} {'repeat':>9} {'rows':>9}  description")
-    for qid, (desc, sqls) in QUERIES.items():
-        first_s, rows = run_query(con, sqls)
-        repeat_s, _ = run_query(con, sqls)
-        print(f"{qid:<6} {first_s * 1000:>7.0f}ms {repeat_s * 1000:>7.0f}ms "
-              f"{rows:>9,}  {desc}")
+    for model_id, m in MODELS.items():
+        n_cols = len(con.execute(
+            f"SELECT * FROM dl.cs_wide{m['suffix']} LIMIT 0").description)
+        print(f"-- {model_id} ({n_cols} wide columns)")
+        print(f"{'query':<6} {'first':>9} {'repeat':>9} {'rows':>9}  description")
+        for qid, (desc, sqls) in make_queries(m).items():
+            first_s, rows = run_query(con, sqls)
+            repeat_s, _ = run_query(con, sqls)
+            print(f"{qid:<6} {first_s * 1000:>7.0f}ms {repeat_s * 1000:>7.0f}ms "
+                  f"{rows:>9,}  {desc}")
+        print()
 
 
 if __name__ == "__main__":

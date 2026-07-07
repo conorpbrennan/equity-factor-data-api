@@ -179,6 +179,16 @@
        covers the NVMe grids only (httpfs traffic arrives over sockets, invisible to rchar); the
        Stage-3 pruning figures — megabytes for right-layout queries, the full ~1.4 GB store for
        wrong-layout ones — describe what S3 serves, since the plans are identical.</p>
+    <p><strong>The warm cache, quantified.</strong> Warm figures are DuckDB's external file cache:
+       fetched S3 byte ranges are kept in the buffer pool
+       (<span class="mono">enable_external_file_cache</span>, on by default since 1.3) and capped by
+       <span class="mono">memory_limit</span> — 80% of RAM unless set (49.9 GiB on the NY box), evicted
+       LRU alongside query working memory, so a long session can hold the entire 2.7 GB hot dataset.
+       Inspect it with <span class="mono">SELECT * FROM duckdb_external_file_cache()</span>; flush it
+       with <span class="mono">SET enable_external_file_cache = false</span>, which drops every cached
+       range immediately (verified: queries return to network cost; re-enabling repopulates). The
+       cache is per-process and not persistent — a fresh session always starts cold, which is exactly
+       what the sync option (or the cache_httpfs extension) addresses.</p>
     <p><strong>Sources.</strong> <span class="mono">data/benchmark/summary.json</span> ·
        <span class="mono">s3://…/results/ec2_local</span> · <span class="mono">s3://…/results/ec2_s3</span> ·
        <span class="mono">data/benchmark_s3/summary.json</span> (dev → S3: 3 cold / 3 warm iterations;
