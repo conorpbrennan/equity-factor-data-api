@@ -86,7 +86,7 @@ and print first-run vs repeat timings.
 anonymous requests when `AWS_ACCESS_KEY_ID` is absent:
 
 ```sh
-pip install duckdb polars boto3
+pip install -r requirements.txt
 python python_src/sample_client.py
 ```
 

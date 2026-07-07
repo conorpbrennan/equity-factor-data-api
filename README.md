@@ -12,7 +12,7 @@ the DuckLake catalog (4.3 MiB), attaches it in DuckDB, and runs the six
 benchmark queries anonymously:
 
 ```sh
-pip install duckdb polars boto3
+pip install -r requirements.txt
 python python_src/sample_client.py
 ```
 
