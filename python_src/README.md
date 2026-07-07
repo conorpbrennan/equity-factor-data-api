@@ -110,3 +110,33 @@ LRU eviction — ample for the whole hot dataset. Inspect it with
 `SELECT * FROM duckdb_external_file_cache()`; flush it with
 `SET enable_external_file_cache = false` (instant, verified); it is
 per-process, so every new session starts cold.
+
+### cache_httpfs vs DuckLake — different layers, they stack
+
+**DuckLake is a metadata layer.** A catalog (DuckDB file, or Postgres for
+multi-user) recording tables, snapshots, data files, and per-file column
+stats for Parquet in object storage. It removes *plan-time* round trips —
+no bucket listing, no globbing, no footer reads (the ~30× warm penalty plain
+Parquet pays from a remote client) — and adds transactional appends,
+consistent snapshots, and time travel. It does not move data: every scan
+still fetches from S3.
+
+**cache_httpfs is a data layer.** A community extension that persists fetched
+byte ranges to local disk, surviving across processes. It removes *repeated
+data* round trips — the 2.7–5.4 s cold starts of a fresh session — at the
+cost of disk management and staleness validation. It knows nothing about
+tables; it just caches reads.
+
+| Cost | Removed by |
+|---|---|
+| listing / glob / footer round trips | DuckLake (catalog plans locally) |
+| re-fetching data within a session | DuckDB's built-in cache (above) |
+| re-fetching data in a new session | cache_httpfs (disk, persistent) |
+| the very first fetch of a range | neither — prefetch or sync |
+
+They stack: DuckLake's data reads go through httpfs, so cache_httpfs caches
+them transparently. Catalog + persistent range cache converges on the same
+steady state as syncing the wide tables locally — lazily, per-range, instead
+of ~2.7 GB upfront. Note DuckLake is a first-party DuckDB project with a
+specified format; cache_httpfs is third-party community code — fine for a
+research laptop, scrutinize before making it load-bearing.
