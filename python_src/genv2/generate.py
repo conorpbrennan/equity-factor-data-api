@@ -155,10 +155,10 @@ def generate(cfg: V2Config, years: list[int] | None = None, quiet: bool = False,
         print(f"calendar {len(days)} dates; slots {uni.n_slots:,}; "
               f"models {len(cfg.models)}")
 
-    restate_rows = {"model_id": [], "cob_date": [], "version_id": [],
-                    "published_date": []}
-
     for m in cfg.models:
+        # per-model log path: parallel lanes must never clobber each other
+        restate_rows = {"model_id": [], "cob_date": [], "version_id": [],
+                        "published_date": []}
         static = build_static(cfg, m, uni)
         S = uni.n_slots
         # decide chunking from a first-date estimate of loading rows/year
@@ -225,7 +225,7 @@ def generate(cfg: V2Config, years: list[int] | None = None, quiet: bool = False,
             if not quiet:
                 print(f"{m.model_id} {year}: {rows_y:,} loading rows "
                       f"[{time.perf_counter() - ty:.1f}s]", flush=True)
-
-    write_parquet(pa.table(restate_rows), f"{out}/restatement_log.parquet", cfg)
+        write_parquet(pa.table(restate_rows),
+                      f"{out}/restatement_log/model_id={m.model_id}/log.parquet", cfg)
     if not quiet:
         print(f"done in {(time.perf_counter() - t0) / 60:.1f} min -> {out}")

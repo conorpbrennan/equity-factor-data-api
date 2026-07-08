@@ -34,8 +34,10 @@ def run_validation(cfg: V2Config) -> int:
               "factor_return", "fmp"):
         con.execute(f"CREATE VIEW {t} AS SELECT * FROM "
                     f"read_parquet('{out}/{t}/**/*.parquet', hive_partitioning=true)")
-    for t in ("model_master", "factor_master", "asset_master", "restatement_log"):
+    for t in ("model_master", "factor_master", "asset_master"):
         con.execute(f"CREATE VIEW {t} AS SELECT * FROM read_parquet('{out}/{t}.parquet')")
+    con.execute(f"CREATE VIEW restatement_log AS SELECT * FROM "
+                f"read_parquet('{out}/restatement_log/**/*.parquet', hive_partitioning=true)")
 
     days = [r[0] for r in q(
         "SELECT DISTINCT cob_date FROM factor_return ORDER BY cob_date")]
