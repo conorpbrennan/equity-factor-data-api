@@ -87,12 +87,17 @@
   <p class="eyebrow">Equity factor data API · Stage 4 · 2026-07-08</p>
   <h1>Same benchmark, four places — ending at a New York laptop querying AWS Ireland</h1>
   <p class="context">
-    One grid (model <span class="mono">BARRA_USE4_L</span>, six queries, seven storage arms), four
-    environments: the New York dev box on its own NVMe; <span class="mono">r7gd.2xlarge</span>
-    (8 Graviton3 cores) on instance-store NVMe in eu-west-1 (Dublin); the same instance reading
-    Parquet from S3 in-region; and the New York box reading the same Dublin bucket across the
-    Atlantic — ~75 ms of ocean per round trip, the remote-research pattern at its least forgiving.
-    Data regenerated on the instance from seed — byte-identical by construction.
+    One grid (six queries, seven storage arms), four environments: the New York dev box on its own
+    NVMe; <span class="mono">r7gd.2xlarge</span> (8 Graviton3 cores) on instance-store NVMe in
+    eu-west-1 (Dublin); the same instance reading Parquet from S3 in-region; and the New York box
+    reading the same Dublin bucket across the Atlantic — ~75 ms of ocean per round trip, the
+    remote-research pattern at its least forgiving. The store carries <strong>two risk models</strong> —
+    Barra-style (<span class="mono">BARRA_USE4_L</span>, 77 wide columns) and Axioma-style
+    (<span class="mono">AXIOMA_US4_MH</span>, 86 columns), each with its own wide schema and factor
+    taxonomy; the grid below is measured on the Barra model, and the Axioma model queried the same
+    way from New York shows the same profile (12–27 ms warm; first touch 1.2–6.9 s uncached,
+    24–83 ms with the disk cache). Data regenerated on the instance from seed — byte-identical
+    by construction.
   </p>
 
   <div class="summary">
@@ -195,6 +200,15 @@
        cache is per-process and not persistent — a fresh session always starts cold, which is exactly
        what the sync option or the cache_httpfs extension addresses (the latter measured at
        24–83 ms fresh-process first-touch; see the key view above).</p>
+    <p><strong>Two models, one store.</strong> The DuckLake catalog holds both models' tables
+       (<span class="mono">cs_wide</span> / <span class="mono">ts_wide</span> and their
+       <span class="mono">*_axioma</span> twins): model selection is table selection, because wide
+       schemas are per-model by design — factor identity is model-scoped
+       (<span class="mono">MOMENTUM</span> ≠ <span class="mono">MT_MOMENTUM</span>), so pointing a
+       query at the wrong model fails loudly on a missing column rather than silently returning the
+       wrong numbers. Coverage universes differ too: the same date's cross-section is 2,949 assets
+       under Barra and 2,963 under Axioma. The two-model suite is
+       <span class="mono">python_src/sample_client.py</span>.</p>
     <p><strong>Sources.</strong> <span class="mono">data/benchmark/summary.json</span> ·
        <span class="mono">s3://…/results/ec2_local</span> · <span class="mono">s3://…/results/ec2_s3</span> ·
        <span class="mono">data/benchmark_s3/summary.json</span> (dev → S3: 3 cold / 3 warm iterations;
