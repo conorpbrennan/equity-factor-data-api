@@ -3,8 +3,6 @@ gross, restatement rate, new-dataset shapes. Blocking."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import duckdb
 
 from generator.trading_calendar import trading_days
@@ -13,8 +11,15 @@ from .fleet import REGIONS, V2Config
 
 
 def run_validation(cfg: V2Config) -> int:
-    out = Path(cfg.output_dir)
+    out = cfg.output_dir.rstrip("/")
     con = duckdb.connect()
+    if out.startswith("s3://"):
+        import os
+        con.execute("INSTALL httpfs; LOAD httpfs;")
+        con.execute(f"""CREATE SECRET (TYPE s3,
+            KEY_ID '{os.environ["AWS_ACCESS_KEY_ID"]}',
+            SECRET '{os.environ["AWS_SECRET_ACCESS_KEY"]}',
+            REGION 'eu-west-1')""")
     failures = []
 
     def check(name, ok, detail=""):

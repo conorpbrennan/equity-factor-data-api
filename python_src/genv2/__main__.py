@@ -55,9 +55,8 @@ def main(argv=None) -> int:
                  skip_dims=args.skip_dims, dims_only=args.dims_only)
         return 0
     if args.cmd == "transforms":
-        from pathlib import Path
         from .transforms import build
-        build(cfg, Path(cfg.output_dir), Path(args.out_root), args.strategy)
+        build(cfg, cfg.output_dir, args.out_root, args.strategy)
         return 0
     from .validate import run_validation
     return run_validation(cfg)

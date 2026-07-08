@@ -11,7 +11,7 @@ import pyarrow as pa
 
 from generator.rng import round_sig, stream
 from generator.trading_calendar import trading_days, years_of
-from generator.writer import write_parquet
+from .writer import write_any as write_parquet
 
 from . import writer as W
 from .engine import (ModelStatic, ModelState, advance, build_static,
@@ -36,7 +36,7 @@ def _ticker(aid: int) -> str:
     return s
 
 
-def write_dimensions(cfg: V2Config, uni: MultiUniverse, days, out: Path) -> None:
+def write_dimensions(cfg: V2Config, uni: MultiUniverse, days, out) -> None:
     from .fleet import FLEET
     ms = tuple(FLEET.values())   # dims always describe the full fleet
     write_parquet(pa.table({
@@ -50,7 +50,7 @@ def write_dimensions(cfg: V2Config, uni: MultiUniverse, days, out: Path) -> None
         "specific_risk_convention": [m.specific_risk_convention for m in ms],
         "return_convention": [m.return_convention for m in ms],
         "base_model_id": [m.base_model_id for m in ms],
-    }), out / "model_master.parquet", cfg)
+    }), f"{out}/model_master.parquet", cfg)
 
     mids, fids, seqs, types = [], [], [], []
     for m in ms:
@@ -63,7 +63,7 @@ def write_dimensions(cfg: V2Config, uni: MultiUniverse, days, out: Path) -> None
         "model_id": mids, "factor_id": fids,
         "factor_seq": pa.array(seqs, type=pa.int16()),
         "factor_name": fids, "factor_type": types,
-    }), out / "factor_master.parquet", cfg)
+    }), f"{out}/factor_master.parquet", cfg)
 
     n = uni.n_slots
     used = uni.entry_idx < uni.n_dates
@@ -80,14 +80,14 @@ def write_dimensions(cfg: V2Config, uni: MultiUniverse, days, out: Path) -> None
         "ccy_code": pa.array(uni.ccy_code[used], type=pa.int16()),
         "start_date": pa.array(days[uni.entry_idx[used]]),
         "end_date": pa.array(end_days[used], mask=never[used]),
-    }), out / "asset_master.parquet", cfg)
+    }), f"{out}/asset_master.parquet", cfg)
 
     write_parquet(pa.table({
         "asset_id": pa.array(np.repeat(ids, 2)),
         "vendor": ["BARRA", "AXIOMA"] * len(ids),
         "vendor_asset_id": [v for i in ids
                             for v in (f"B{int(i):07d}", f"AX{int(i):07d}")],
-    }), out / "asset_xref.parquet", cfg)
+    }), f"{out}/asset_xref.parquet", cfg)
 
 
 class _Buf:
@@ -145,7 +145,7 @@ def generate(cfg: V2Config, years: list[int] | None = None, quiet: bool = False,
         raise ValueError("years must be contiguous")
 
     uni = build_multi_universe(cfg, len(days))
-    out = Path(cfg.output_dir)
+    out = cfg.output_dir.rstrip('/')
     if not skip_dims:
         write_dimensions(cfg, uni, days, out)
     if dims_only:
@@ -226,6 +226,6 @@ def generate(cfg: V2Config, years: list[int] | None = None, quiet: bool = False,
                 print(f"{m.model_id} {year}: {rows_y:,} loading rows "
                       f"[{time.perf_counter() - ty:.1f}s]", flush=True)
 
-    write_parquet(pa.table(restate_rows), out / "restatement_log.parquet", cfg)
+    write_parquet(pa.table(restate_rows), f"{out}/restatement_log.parquet", cfg)
     if not quiet:
         print(f"done in {(time.perf_counter() - t0) / 60:.1f} min -> {out}")
