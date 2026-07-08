@@ -164,16 +164,21 @@ warm — fixed costs weighted the way real usage weights them.
 
 ## 5. Sizing (20 years, 5,218 dates) and tiers
 
+Variants are fully materialized and included below — the global variant alone
+is ~7.0B loading rows, which is precisely the customization cost worth
+measuring. ❓ *Is global-model customization actually expected, or does it
+happen only on regionals? (Changes totals by ~35%.)*
+
 | dataset | rows | ≈ compressed |
 |---|---|---|
-| factor_loading, 12 models | **~14.6B** (globals 10.4B of it) | ~105 GB |
-| fmp | ~3.3B | ~26 GB |
-| specific_risk | ~0.8B | ~7 GB |
-| factor_covariance | ~0.4B | ~3.5 GB |
-| factor_return + dims | ~12M | ~0.1 GB |
-| **normalized total** | | **~140 GB** |
-| wide transforms (dual, per strategy arm) | | +120–180 GB |
-| **project total** | | **~0.3–0.45 TB** |
+| factor_loading, 12 models | **~21.0B** (two globals 10.3B; global variant 7.0B) | ~150 GB |
+| fmp | ~4.9B | ~38 GB |
+| specific_risk | ~1.1B | ~9 GB |
+| factor_covariance | ~0.5B | ~4.5 GB |
+| factor_return + dims | ~15M | ~0.1 GB |
+| **normalized total** | | **~200 GB** |
+| wide transforms (dual, per strategy arm) | | +170–250 GB |
+| **project total** | | **~0.45–0.6 TB** |
 
 - **Dev tier**: regionals + one variant only — v1 scale (~15 GB), laptop-friendly.
 - **Full tier**: everything, generated on EC2 (r7gd.2xlarge, est. 2–4 h), lives
@@ -194,3 +199,4 @@ warm — fixed costs weighted the way real usage weights them.
 5. ~~Fleet size~~ **confirmed: 10 vendor models.** Still open: variant cadence (~quarterly?).
 6. Restatement rate ~1% of model-dates, lag ≤ 5 days?
 7. Anything material missing from the daily load besides returns/FMPs (e.g., descriptor-level data, currency risk-free curves)?
+8. Do customizations happen on global models, or regionals only? (A materialized global variant is ~7B loading rows — it moves the totals by ~35%.)

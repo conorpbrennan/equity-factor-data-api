@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Generator Spec v2 — validation draft</title>
+<style>
+  /* Light paper, dark ink; the single accent marks exactly one thing:
+     questions a practitioner must validate. */
+  :root {
+    --surface: #fffffe; --ink: #1c2126; --ink-2: #43494f; --ink-3: #7d838a;
+    --hairline: #e6e7e9; --bar: #61676e; --accent: #3b6ea5;
+  }
+  body { background: var(--surface); color: var(--ink); margin: 0;
+         padding: 3.5rem 1.5rem 4rem;
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; }
+  main { max-width: 960px; margin: 0 auto; }
+  .eyebrow { font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+             color: var(--ink-3); margin: 0 0 .6rem; }
+  h1 { font-size: 1.55rem; font-weight: 650; margin: 0 0 .45rem; text-wrap: balance; }
+  h2 { font-size: 1.05rem; font-weight: 650; margin: 3rem 0 .3rem; }
+  .context, p { color: var(--ink-2); max-width: 72ch; }
+  .context { margin: 0 0 .4rem; }
+
+  .ask { color: var(--accent); }
+  .ask::before { content: "Q · "; font-weight: 650; letter-spacing: .02em; }
+
+  .tablewrap { overflow-x: auto; margin: 1rem 0 .4rem; }
+  table { border-collapse: collapse; font-size: .8rem; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: .34rem 1.1rem .34rem 0; white-space: nowrap; }
+  thead th { color: var(--ink-3); font-weight: 500; font-size: .7rem; letter-spacing: .06em;
+             text-transform: uppercase; border-bottom: 1px solid var(--hairline); }
+  th:nth-child(-n+2), td:nth-child(-n+2) { text-align: left; }
+  td { color: var(--ink-2); border-bottom: 1px solid var(--hairline); }
+  td:first-child { color: var(--ink); }
+  tr.total td { color: var(--ink); font-weight: 600; border-bottom: none; border-top: 1px solid var(--ink-3); }
+
+  .vol { display: inline-block; height: 8px; background: var(--bar); border-radius: 1px;
+         vertical-align: baseline; min-width: 1px; }
+  td.volcell { text-align: left; padding-right: 0; }
+
+  pre { font: .78rem/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: var(--ink-2); margin: .8rem 0; padding: 0 0 0 1rem;
+        border-left: 2px solid var(--hairline); overflow-x: auto; }
+  .note { font-size: .78rem; color: var(--ink-3); max-width: 76ch; margin: .3rem 0 0; }
+
+  ol.questions { max-width: 76ch; color: var(--ink-2); padding-left: 1.4rem; }
+  ol.questions li { margin: .5rem 0; }
+  ol.questions li.confirmed { color: var(--ink-3); }
+  ol.questions li.confirmed .tag { color: var(--ink); font-weight: 600; }
+  footer { margin-top: 3.2rem; font-size: .78rem; color: var(--ink-2); max-width: 76ch; }
+</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Equity factor data API · Generator spec v2 · 2026-07-08</p>
+  <h1>V2 data spec: fleet, global scale, returns &amp; FMPs</h1>
+  <p class="context">
+    Extends the v1 spec (built, benchmarked, conclusions standing) with the four review points:
+    factor returns and factor-mimicking portfolios in the daily load; a global model size class;
+    a ten-model vendor fleet with custom variants; serial query chains. Every dimension below is
+    a number a practitioner can eyeball — <span class="ask">lines like this are the explicit
+    validation asks</span>, consolidated in §6. All v1 mechanics carry over unchanged
+    (deterministic seeds, AR(1) persistence, sparse loading storage, per-model conventions,
+    PSD covariances).
+  </p>
+
+  <h2>1 · Model fleet — ten vendor models, two custom variants</h2>
+  <p>Fleet size confirmed at ten. The volume bar is each model's share of loading rows —
+     the global models and the global variant <em>are</em> the storage problem.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>model</th><th>proxy for</th><th>sty·ind·ctry·ccy&nbsp;+mkt</th>
+      <th>factors</th><th>coverage</th><th>estu</th><th>loadings /20y</th><th></th></tr></thead>
+    <tbody>
+      <tr><td class="mono">AX_WW4_MH</td><td>Axioma global (AXWW4-MH)</td><td class="mono">16·64·95·72 +1</td><td>248</td><td>58,000</td><td>13,000</td><td>6.1B</td><td class="volcell"><i class="vol" style="width:130px"></i></td></tr>
+      <tr><td class="mono">BARRA_GEM_L</td><td>Barra global (GEM-like)</td><td class="mono">12·60·90·70 +1</td><td>233</td><td>50,000</td><td>11,000</td><td>4.2B</td><td class="volcell"><i class="vol" style="width:90px"></i></td></tr>
+      <tr><td class="mono">BARRA_USE4_L</td><td>Barra US (v1, built)</td><td class="mono">12·60·—·— +1</td><td>73</td><td>3,000</td><td>2,700</td><td>0.22B</td><td class="volcell"><i class="vol" style="width:5px"></i></td></tr>
+      <tr><td class="mono">AX_US4_MH</td><td>Axioma US (v1, built)</td><td class="mono">13·68·—·— +1</td><td>82</td><td>3,000</td><td>2,700</td><td>0.23B</td><td class="volcell"><i class="vol" style="width:5px"></i></td></tr>
+      <tr><td class="mono">BARRA_EUE4_L</td><td>Barra Europe</td><td class="mono">12·50·24·12 +1</td><td>99</td><td>6,000</td><td>2,500</td><td>0.51B</td><td class="volcell"><i class="vol" style="width:11px"></i></td></tr>
+      <tr><td class="mono">AX_EU4_MH</td><td>Axioma Europe</td><td class="mono">13·45·24·12 +1</td><td>95</td><td>6,000</td><td>2,500</td><td>0.54B</td><td class="volcell"><i class="vol" style="width:11px"></i></td></tr>
+      <tr><td class="mono">BARRA_JPE4_L</td><td>Barra Japan</td><td class="mono">12·30·—·— +1</td><td>43</td><td>4,000</td><td>1,800</td><td>0.32B</td><td class="volcell"><i class="vol" style="width:7px"></i></td></tr>
+      <tr><td class="mono">AX_JP4_MH</td><td>Axioma Japan</td><td class="mono">13·33·—·— +1</td><td>47</td><td>4,000</td><td>1,800</td><td>0.34B</td><td class="volcell"><i class="vol" style="width:7px"></i></td></tr>
+      <tr><td class="mono">BARRA_EME4_L</td><td>Barra Emerging</td><td class="mono">12·38·38·26 +1</td><td>115</td><td>8,000</td><td>3,000</td><td>0.67B</td><td class="volcell"><i class="vol" style="width:14px"></i></td></tr>
+      <tr><td class="mono">AX_EM4_MH</td><td>Axioma Emerging</td><td class="mono">13·40·40·28 +1</td><td>122</td><td>8,000</td><td>3,000</td><td>0.71B</td><td class="volcell"><i class="vol" style="width:15px"></i></td></tr>
+      <tr><td class="mono">AX_WW4_MH_SFM1</td><td>variant: +3 custom styles</td><td class="mono">19·64·95·72 +1</td><td>251</td><td>58,000</td><td>13,000</td><td>7.0B</td><td class="volcell"><i class="vol" style="width:150px"></i></td></tr>
+      <tr><td class="mono">BARRA_USE4_L_SFM1</td><td>variant: +2 custom styles</td><td class="mono">14·60·—·— +1</td><td>75</td><td>3,000</td><td>2,700</td><td>0.25B</td><td class="volcell"><i class="vol" style="width:5px"></i></td></tr>
+      <tr class="total"><td colspan="6">total</td><td>≈21.0B</td><td></td></tr>
+    </tbody>
+  </table></div>
+  <p class="ask">Global factor split — is 16 style / 64 industry right for the 81 non-country/currency
+     factors of AXWW4-MH? And is this region/vendor mix representative?</p>
+  <p>A <strong>variant</strong> is a new <span class="mono">model_id</span> generated from a base
+     ± a factor delta, fully materialized: shared factors byte-identical to the base by seed
+     construction, custom styles fresh AR(1) series. Nonzero loadings per asset-day: globals ~20
+     (16 styles dense, 1–2 industry, 1 country, 1 currency, market), regionals ~15–16.
+     Multi-listed securities carry exactly one country and one currency loading.
+     <span class="ask">OK to ignore multi-currency lines / DR-vs-ordinary linkage for a storage
+     benchmark?</span> <span class="ask">Variant cadence — appears ~quarterly, lives for years?</span></p>
+
+  <h2>2 · New datasets — the rest of the daily load</h2>
+  <pre>factor_return(model_id, cob_date, factor_id, value, version_id)</pre>
+  <p>One row per factor per day; vendor-convention units per model (daily percent vs daily
+     decimal, mirroring the v1 convention game). Trivial volume (&lt;15M rows total).
+     <span class="ask">Daily, local currency, no intraday compounding?</span></p>
+  <pre>fmp(model_id, cob_date, factor_id, asset_id, weight, version_id)</pre>
+  <p>Factor-mimicking portfolios: weights over the <em>estimation universe</em>, dense, for
+     style + market factors only; unit gross per factor, slow AR(1) turnover.
+     <span class="ask">Estu-only and dense — or coverage-wide / sparsified?</span></p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>model</th><th>(styles+1) × estu × 5,218</th><th>rows /20y</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">AX_WW4_MH</td><td class="mono">17 × 13,000 × 5,218</td><td>1.15B</td></tr>
+      <tr><td class="mono">BARRA_GEM_L</td><td class="mono">13 × 11,000 × 5,218</td><td>0.75B</td></tr>
+      <tr><td>eight regionals</td><td></td><td>1.41B</td></tr>
+      <tr><td>two variants</td><td></td><td>1.57B</td></tr>
+      <tr class="total"><td colspan="2">total</td><td>≈4.9B ≈ 38 GB</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>3 · Storage strategies — the table-per-model question, measured</h2>
+  <p>The review's operational criterion: <em>adding a model must never become a project.</em>
+     Three physical strategies, one normalized source, all benchmarked — plus an operational
+     drill (add a model, add a variant) scored on wall-time, steps, and bytes rewritten.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th></th><th>strategy</th><th>add a model costs</th><th>objects at 12 models</th><th>expected weakness</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">A</td><td>per-model wide tables (v1)</td><td>config + transform run (DDL generated)</td><td>24+ tables</td><td>object count compounds</td></tr>
+      <tr><td class="mono">B</td><td>one generic-slot table + alias map + generated views</td><td>insert map rows + create views</td><td>1 table + views</td><td>governance; wide footers</td></tr>
+      <tr><td class="mono">C</td><td>normalized long</td><td>nothing</td><td>1 table</td><td>pivot cost (measured: 5–48×)</td></tr>
+    </tbody>
+  </table></div>
+  <pre>wide_generic(
+    model_id, cob_date, asset_id, version_id, specific_risk,
+    F001 DOUBLE, F002 DOUBLE, ... F260 DOUBLE        -- slot pool ≥ max model + headroom
+)
+factor_slot_map(model_id, slot_id, factor_id, factor_seq,
+                valid_from, valid_to)                 -- temporal; slots append-only, never reused
+
+CREATE VIEW wide_cs_barra_use4_l AS                   -- generated; the ONLY query surface
+  SELECT cob_date, asset_id, F001 AS "BETA", F002 AS "MOMENTUM", ..., specific_risk
+  FROM wide_generic WHERE model_id = 'BARRA_USE4_L';</pre>
+  <p class="note">What makes B safe: humans never query Fnnn columns — the generated views restore
+     loud failure (missing named column) on wrong-model access, instead of silently returning
+     another factor's numbers. Partitioned by model_id, per-model scan behavior should match A;
+     unused slots are NULL (near-free in Parquet) but widen footers — one of the things measured.
+     A float-only slot pool suffices for this payload.</p>
+
+  <h2>4 · Query suite additions</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>id</th><th>pattern — sessions run chains, not isolated queries</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">CHAIN1</td><td>loadings for 100 names, latest date → factor returns for those factors, 5y</td></tr>
+      <tr><td class="mono">CHAIN2</td><td>loadings (one date, estu) → factor covariance → specific risk</td></tr>
+      <tr><td class="mono">FMP1</td><td>one factor's full weight vector, one date</td></tr>
+      <tr><td class="mono">FMP2</td><td>one factor's weights for 10 assets, 20y</td></tr>
+      <tr><td class="mono">DRILL</td><td>operational: add a model; add a variant — wall-time, steps, bytes rewritten</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Chains timed end-to-end per session (connect → last DataFrame), cold and warm —
+     weighting fixed costs the way real usage does.</p>
+
+  <h2>5 · Sizing and tiers</h2>
+  <p>Variants fully materialized and included — the global variant alone is ~7.0B loading rows,
+     which is exactly the customization cost worth measuring.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>dataset</th><th>rows</th><th>≈ compressed</th></tr></thead>
+    <tbody>
+      <tr><td>factor_loading (12 models)</td><td>~21.0B</td><td>~150 GB</td></tr>
+      <tr><td>fmp</td><td>~4.9B</td><td>~38 GB</td></tr>
+      <tr><td>specific_risk</td><td>~1.1B</td><td>~9 GB</td></tr>
+      <tr><td>factor_covariance</td><td>~0.5B</td><td>~4.5 GB</td></tr>
+      <tr><td>factor_return + dims</td><td>~15M</td><td>~0.1 GB</td></tr>
+      <tr class="total"><td>normalized total</td><td></td><td>~200 GB</td></tr>
+      <tr><td>wide transforms (dual, per strategy arm)</td><td></td><td>+170–250 GB</td></tr>
+      <tr class="total"><td>project total</td><td></td><td>~0.45–0.6 TB</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>Dev tier</strong>: regionals + one regional variant — v1 scale (~15 GB), laptop-friendly.
+     <strong>Full tier</strong>: everything, generated on EC2 (est. 3–5 h), lives in S3
+     (~$12/mo). Deterministic seeds ⇒ tiers agree exactly where they overlap.
+     Restatements (promoted from v1 deferred): seeded 1% of model-dates get
+     <span class="mono">version_id = 2</span> rows at T+1..T+5 lag, with as-of query forms.
+     <span class="ask">Realistic restatement rate and lag?</span></p>
+
+  <h2>6 · Validation questions, consolidated</h2>
+  <ol class="questions">
+    <li>Global factor split: 16 style / 64 industry / 95 country / 72 currency / 1 market for the AXWW4-MH proxy?</li>
+    <li>Coverage 58k / estu 13k global; regional universes per the §1 table?</li>
+    <li>FMPs: estimation-universe-only, dense weights, styles + market only?</li>
+    <li>Factor returns: daily, local currency, vendor-convention units?</li>
+    <li class="confirmed"><span class="tag">Confirmed:</span> ten vendor models. Still open: variant cadence (~quarterly?).</li>
+    <li>Restatement rate ~1% of model-dates, lag ≤ 5 days?</li>
+    <li>Anything material missing from the daily load besides returns/FMPs (descriptor-level data, currency curves)?</li>
+    <li>Do customizations happen on global models, or regionals only? (A materialized global variant is ~7B loading rows — it moves totals by ~35%.)</li>
+  </ol>
+
+  <footer>
+    <p>Markdown source: <span class="mono">generator-spec-v2.md</span> · v1 spec (mechanics
+       reference): <span class="mono">generator-spec.md</span> · benchmark evidence behind the
+       strategy expectations: <span class="mono">benchmark-comparison-stage4.html</span>.</p>
+  </footer>
+</main>
+</body>
+</html>
