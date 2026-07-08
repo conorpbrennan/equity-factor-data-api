@@ -13,7 +13,9 @@ benchmark queries anonymously:
 
 ```sh
 pip install -r requirements.txt
-python python_src/sample_client.py
+python python_src/sample_client.py            # first touch pays S3 latency
+python python_src/sample_client.py --cache    # persists ranges to disk: every
+                                              # later run starts at ~30 ms
 ```
 
 Expected output (from a machine outside AWS, eu-west-1 bucket):
@@ -30,7 +32,10 @@ TS3       6328ms      15ms     5,218  one covariance pair, 20 years
 
 First touch of each table pays S3 latency; repeats run at local-disk speed
 over the public internet, because the DuckLake catalog plans every scan
-locally — only data bytes cross the wire.
+locally — only data bytes cross the wire. With `--cache` (community
+cache_httpfs extension), fetched ranges persist to local disk, so even a
+fresh process starts warm: measured first-touch drops from seconds to
+24–83 ms.
 
 ## What's here
 
