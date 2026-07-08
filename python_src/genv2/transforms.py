@@ -22,7 +22,7 @@ from pathlib import Path
 
 import duckdb
 
-from .fleet import REGIONS, V2Config, V2Model
+from .fleet import FLEET, REGIONS, V2Config, V2Model
 from .writer import is_s3
 
 MAX_SLOTS = 260
@@ -32,9 +32,14 @@ BIG_MODEL_YEAR_ROWS = 60_000_000
 
 
 def _connect(*roots) -> duckdb.DuckDBPyConnection:
+    """Threads/memory come from DUCK_THREADS / DUCK_MEM when set, so several
+    lane processes can share one box with explicit budgets."""
     con = duckdb.connect()
-    con.execute(f"SET threads = {max(4, (os.cpu_count() or 8) - 1)}")
-    con.execute("SET memory_limit = '90GB'") if (os.cpu_count() or 0) >= 16 else None
+    threads = os.environ.get("DUCK_THREADS") or max(4, (os.cpu_count() or 8) - 1)
+    con.execute(f"SET threads = {threads}")
+    mem = os.environ.get("DUCK_MEM") or ("90GB" if (os.cpu_count() or 0) >= 16 else None)
+    if mem:
+        con.execute(f"SET memory_limit = '{mem}'")
     tmp = os.environ.get("DUCK_TMP")
     if tmp:
         con.execute(f"SET temp_directory = '{tmp}'")
@@ -177,10 +182,21 @@ def build_strategy_b(cfg: V2Config, out_a: str, out: str,
             print(f"B {m.model_id}: cs {gcs_s:.0f}s, ts {time.perf_counter() - t0:.0f}s",
                   flush=True)
 
+    if set(m.model_id for m in cfg.models) == set(FLEET):
+        write_slot_map_and_views(cfg, out, quiet)
+
+
+def write_slot_map_and_views(cfg: V2Config, out: str, quiet=False) -> None:
+    """Metadata for strategy B, always over the FULL fleet — parallel lanes
+    must not write subset versions (last-writer-wins)."""
+    import pyarrow as pa
+    from .writer import write_any
+    from .fleet import FLEET as _F
+    fleet = tuple(_F.values())
     rows = {"model_id": [], "slot_id": [], "factor_id": [], "factor_seq": [],
             "valid_from": [], "valid_to": []}
     views = []
-    for m in cfg.models:
+    for m in fleet:
         named = ", ".join(f'F{seq + 1:03d} AS "{fid}"'
                           for seq, fid in enumerate(m.factor_ids))
         for layout in ("generic_cs", "generic_ts"):
@@ -219,3 +235,5 @@ def build(cfg: V2Config, normalized: str, out_root: str, strategy: str,
     if strategy in ("b", "both"):
         build_strategy_b(cfg, f"{out_root}/transforms_a", f"{out_root}/transforms_b",
                          years, quiet)
+    if strategy == "map":
+        write_slot_map_and_views(cfg, f"{out_root}/transforms_b", quiet)

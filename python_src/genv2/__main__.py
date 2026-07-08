@@ -27,8 +27,10 @@ def main(argv=None) -> int:
             p.add_argument("--skip-dims", action="store_true")
             p.add_argument("--dims-only", action="store_true")
         if name == "transforms":
-            p.add_argument("--strategy", choices=("a", "b", "both"), default="both")
+            p.add_argument("--strategy", choices=("a", "b", "both", "map"), default="both")
             p.add_argument("--out-root", default="data/v2")
+            p.add_argument("--models", default=None,
+                           help="comma-separated model_id subset (parallel lanes)")
     args = ap.parse_args(argv)
 
     from .fleet import make_config
@@ -55,6 +57,10 @@ def main(argv=None) -> int:
                  skip_dims=args.skip_dims, dims_only=args.dims_only)
         return 0
     if args.cmd == "transforms":
+        if args.models:
+            wanted = args.models.split(",")
+            cfg = dataclasses.replace(
+                cfg, models=tuple(m for m in cfg.models if m.model_id in wanted))
         from .transforms import build
         build(cfg, cfg.output_dir, args.out_root, args.strategy)
         return 0
