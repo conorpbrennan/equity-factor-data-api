@@ -195,3 +195,23 @@ Rough compressed footprints, given AR(1) persistence:
 ## Next Step
 
 Draft the **generator spec**: parameter block (universe size, churn rate, factor taxonomy, AR coefficients, seed scheme) plus the normalized DDL. Everything downstream is mechanical once that's pinned.
+
+---
+
+## V2 Scope — practitioner review (a colleague, SFM, 2026-07-08)
+
+V1 (everything above) is built, benchmarked across four environments, and its conclusions stand. Chris's review of the plan/spec surfaced four gaps between the proxy and the real daily load; v2 closes them. Full dimensioning in `generator-spec-v2.md` — written so he can validate the numbers before we generate.
+
+1. **Missing datasets: factor returns and factor-mimicking portfolios.** Both are part of the daily vendor load. v2 adds `factor_return` (n_factors × 1 per day — trivially small) and `fmp` ((style + market factors) × estimation-universe assets per day — decidedly not small at global scale: ~1.15B rows/20y for one global model).
+
+2. **Global models are a different size class.** V1's dimensions are regional. v2 adds global-model configs proxying AXWW4-MH: **248 factors** (16 style / 64 industry / 95 country / 72 currency / 1 market), **~58,000 coverage / ~13,000 estimation universe**. One global model's loadings ≈ **6.1B rows/20y** — ~28× a v1 regional model. This moves the project from "laptop-scale" to "generate on EC2, two tiers": a dev tier (regionals only, v1-scale) and a full tier (~0.3 TB total).
+
+3. **Model fleet + customization.** Real usage is 5–10 vendor models plus **custom variants** (add/remove factors ⇒ new model variant), with a hard requirement that *adding a model must never be a project*. v2 specs a 6-model fleet (2 global, 4 regional) + 2 variants, and — the design question this raises — makes **storage strategy a measured three-way decision** rather than an opinion:
+   - **(A) per-model wide tables** (v1's approach; DDL generated from `factor_master`, so "setup" is config, not code);
+   - **(B) one generic-slot wide table** — fixed positional columns `F001…F260 DOUBLE` + core keys, with a `factor_slot_map` aliasing slots to model-scoped factor names, and **generated per-model views as the only human query surface** (raw slot columns are never queried directly — the view layer restores loud failure on wrong-model access);
+   - **(C) normalized long** (v1's baseline — zero DDL forever, pivot cost already measured).
+   Each arm is scored on the query suite **plus an operational drill: add a new model and a new variant — wall-time, steps, bytes rewritten.** That drill is the criterion Chris actually stated.
+
+4. **Serial query chains.** Research sessions run chains, not isolated queries: loadings → factor returns; loadings → covariance → specific risk. v2 adds CHAIN1/CHAIN2 to the suite, measured end-to-end per session (cold and warm) — this weights per-query fixed costs (connection, catalog, first-touch) the way real usage does.
+
+Also promoted from v1's deferred list, since PIT behavior is part of the daily-load story: **restatement injection** (`version_id ≥ 2`) with as-of query forms.
