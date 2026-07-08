@@ -14,8 +14,9 @@ conventions, year-boundary checkpoints.
 
 ## 1. Model fleet
 
-Six vendor models + two customization variants. ❓ *Is this a representative
-mix, and are the per-model dimensions sane?*
+**Ten vendor models** (count confirmed by review follow-up, 2026-07-08: expect
+5–10; we assume 10) + two customization variants. ❓ *Are the per-model
+dimensions and the region/vendor mix sane?*
 
 | model_id | proxy for | style | industry | country | currency | market | **factors** | coverage | estu |
 |---|---|---|---|---|---|---|---|---|---|
@@ -24,7 +25,11 @@ mix, and are the per-model dimensions sane?*
 | `BARRA_USE4_L` | Barra US (v1, as built) | 12 | 60 | — | — | 1 | **73** | 3,000 | 2,700 |
 | `AX_US4_MH` | Axioma US (v1, as built) | 13 | 68 | — | — | 1 | **82** | 3,000 | 2,700 |
 | `BARRA_EUE4_L` | Barra Europe | 12 | 50 | 24 | 12 | 1 | **99** | 6,000 | 2,500 |
+| `AX_EU4_MH` | Axioma Europe | 13 | 45 | 24 | 12 | 1 | **95** | 6,000 | 2,500 |
+| `BARRA_JPE4_L` | Barra Japan | 12 | 30 | — | — | 1 | **43** | 4,000 | 1,800 |
 | `AX_JP4_MH` | Axioma Japan | 13 | 33 | — | — | 1 | **47** | 4,000 | 1,800 |
+| `BARRA_EME4_L` | Barra Emerging | 12 | 38 | 38 | 26 | 1 | **115** | 8,000 | 3,000 |
+| `AX_EM4_MH` | Axioma Emerging | 13 | 40 | 40 | 28 | 1 | **122** | 8,000 | 3,000 |
 | `AX_WW4_MH_SFM1` | custom variant | +3 custom styles on `AX_WW4_MH` | | | | | **251** | 58,000 | 13,000 |
 | `BARRA_USE4_L_SFM1` | custom variant | +2 custom styles on `BARRA_USE4_L` | | | | | **75** | 3,000 | 2,700 |
 
@@ -85,8 +90,8 @@ factor, AR(1) over time (φ=0.97) so portfolios turn over slowly.
 |---|---|---|
 | AX_WW4_MH | 17 × 13,000 × 5,218 | **1.15B** |
 | BARRA_GEM_L | 13 × 11,000 × 5,218 | 0.75B |
-| four regionals + variants | | ~0.6B |
-| **total** | | **~2.5B rows ≈ 20 GB** |
+| eight regionals + variants | | ~1.4B |
+| **total** | | **~3.3B rows ≈ 26 GB** |
 
 ---
 
@@ -161,14 +166,14 @@ warm — fixed costs weighted the way real usage weights them.
 
 | dataset | rows | ≈ compressed |
 |---|---|---|
-| factor_loading, 8 models | **~12.3B** (globals 10.4B of it) | ~90 GB |
-| fmp | ~2.5B | ~20 GB |
-| specific_risk | ~0.7B | ~6 GB |
-| factor_covariance | ~0.36B | ~3 GB |
-| factor_return + dims | ~10M | ~0.1 GB |
-| **normalized total** | | **~120 GB** |
-| wide transforms (dual, per strategy arm) | | +100–160 GB |
-| **project total** | | **~0.25–0.4 TB** |
+| factor_loading, 12 models | **~14.6B** (globals 10.4B of it) | ~105 GB |
+| fmp | ~3.3B | ~26 GB |
+| specific_risk | ~0.8B | ~7 GB |
+| factor_covariance | ~0.4B | ~3.5 GB |
+| factor_return + dims | ~12M | ~0.1 GB |
+| **normalized total** | | **~140 GB** |
+| wide transforms (dual, per strategy arm) | | +120–180 GB |
+| **project total** | | **~0.3–0.45 TB** |
 
 - **Dev tier**: regionals + one variant only — v1 scale (~15 GB), laptop-friendly.
 - **Full tier**: everything, generated on EC2 (r7gd.2xlarge, est. 2–4 h), lives
@@ -186,6 +191,6 @@ warm — fixed costs weighted the way real usage weights them.
 2. Coverage 58k / estu 13k global; regional universes per §1 table?
 3. FMPs: estu-only, dense weights, styles + market only?
 4. Factor returns: daily, local currency, vendor-convention units?
-5. Fleet of 6 vendor models + variants at ~quarterly cadence?
+5. ~~Fleet size~~ **confirmed: 10 vendor models.** Still open: variant cadence (~quarterly?).
 6. Restatement rate ~1% of model-dates, lag ≤ 5 days?
 7. Anything material missing from the daily load besides returns/FMPs (e.g., descriptor-level data, currency risk-free curves)?
