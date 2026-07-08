@@ -151,6 +151,11 @@
     day — sync the two wide tables to the client</strong> (<span class="n">~2.7 GB</span> compressed
     for this model, a one-off few minutes; the daily delta is one partition per layout) and query
     locally. Warm performance is identical either way, so syncing costs nothing except disk.
+    The lazy alternative, now measured: the cache_httpfs extension persists fetched ranges to
+    local disk, and a <em>fresh process</em> whose ranges any earlier session touched starts at
+    <span class="n">24–83 ms</span> first-touch (sample client <span class="mono">--cache</span>;
+    376 MB on disk after the full two-model suite) — sync's steady state, warmed per-range
+    on demand instead of 2.7 GB upfront.
   </p>
 
   <h2 class="section-h">Every arm, every environment</h2>
@@ -188,7 +193,8 @@
        with <span class="mono">SET enable_external_file_cache = false</span>, which drops every cached
        range immediately (verified: queries return to network cost; re-enabling repopulates). The
        cache is per-process and not persistent — a fresh session always starts cold, which is exactly
-       what the sync option (or the cache_httpfs extension) addresses.</p>
+       what the sync option or the cache_httpfs extension addresses (the latter measured at
+       24–83 ms fresh-process first-touch; see the key view above).</p>
     <p><strong>Sources.</strong> <span class="mono">data/benchmark/summary.json</span> ·
        <span class="mono">s3://…/results/ec2_local</span> · <span class="mono">s3://…/results/ec2_s3</span> ·
        <span class="mono">data/benchmark_s3/summary.json</span> (dev → S3: 3 cold / 3 warm iterations;
