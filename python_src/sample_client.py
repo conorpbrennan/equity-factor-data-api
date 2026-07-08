@@ -15,13 +15,20 @@ query needs, planned from the local catalog with zero S3 metadata round trips.
 No AWS account needed: the demo prefixes are public-read, and this client
 falls back to anonymous (unsigned) requests when no credentials are present.
 
-    .venv/bin/python python_src/sample_client.py
+    .venv/bin/python python_src/sample_client.py [--cache]
+
+--cache loads the community cache_httpfs extension, which persists fetched
+S3 ranges to local disk — so the *next* process starts warm too (first-touch
+drops from seconds to ~30 ms once any earlier run has fetched the ranges).
+Without it, warmth lives only in DuckDB's in-memory cache and dies with the
+process.
 
 Requires: duckdb, polars, boto3.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import time
 from pathlib import Path
@@ -119,10 +126,20 @@ def fetch_catalog() -> None:
           f" ({size / 2**20:.1f} MiB, {time.perf_counter() - t0:.2f}s)")
 
 
-def connect() -> duckdb.DuckDBPyConnection:
+def connect(persistent_cache: bool = False) -> duckdb.DuckDBPyConnection:
     t0 = time.perf_counter()
     con = duckdb.connect()
-    con.execute("INSTALL httpfs; LOAD httpfs; INSTALL ducklake;")
+    cache_state = "in-memory cache only"
+    if persistent_cache:
+        try:
+            # must load before other filesystems so it can wrap them
+            con.execute("INSTALL cache_httpfs FROM community; LOAD cache_httpfs;")
+            con.execute(f"SET cache_httpfs_cache_directory = "
+                        f"'{CATALOG_LOCAL.parent / 'httpfs'}'")
+            cache_state = "persistent disk cache (cache_httpfs)"
+        except Exception as e:
+            print(f"cache_httpfs unavailable, continuing without: {e}")
+    con.execute("INSTALL httpfs; INSTALL ducklake;")
     if ANONYMOUS:
         # empty-config secret: pins the region, requests go unsigned
         con.execute(f"CREATE SECRET s3cred (TYPE s3, PROVIDER config, REGION '{REGION}')")
@@ -135,8 +152,7 @@ def connect() -> duckdb.DuckDBPyConnection:
         """)
     con.execute(f"ATTACH 'ducklake:{CATALOG_LOCAL}' AS dl (READ_ONLY)")
     print(f"attach: {time.perf_counter() - t0:.2f}s "
-          f"(extensions + TLS + catalog open; "
-          f"{'anonymous' if ANONYMOUS else 'authenticated'})\n")
+          f"({'anonymous' if ANONYMOUS else 'authenticated'}; {cache_state})\n")
     return con
 
 
@@ -150,8 +166,13 @@ def run_query(con: duckdb.DuckDBPyConnection, sqls: list[str]) -> tuple[float, i
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--cache", action="store_true",
+                    help="persist fetched S3 ranges to disk (cache_httpfs) so "
+                         "future processes start warm")
+    args = ap.parse_args()
     fetch_catalog()
-    con = connect()
+    con = connect(persistent_cache=args.cache)
     for model_id, m in MODELS.items():
         n_cols = len(con.execute(
             f"SELECT * FROM dl.cs_wide{m['suffix']} LIMIT 0").description)

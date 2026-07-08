@@ -87,8 +87,14 @@ anonymous requests when `AWS_ACCESS_KEY_ID` is absent:
 
 ```sh
 pip install -r requirements.txt
-python python_src/sample_client.py
+python python_src/sample_client.py            # in-memory cache only
+python python_src/sample_client.py --cache    # + persistent disk cache
 ```
+
+`--cache` loads the community `cache_httpfs` extension: fetched S3 ranges
+persist to `~/.cache/factor-store/httpfs/` (~376 MB after a full suite), so
+the *next* process starts warm — measured first-touch drops from 1.1–6.9 s
+to 24–83 ms. Falls back gracefully if the extension can't be installed.
 
 Representative output from a dev box outside AWS (eu-west-1 bucket):
 
