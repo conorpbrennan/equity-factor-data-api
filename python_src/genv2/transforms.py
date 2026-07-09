@@ -49,6 +49,9 @@ def _connect(*roots) -> duckdb.DuckDBPyConnection:
         con.execute(f"SET temp_directory = '{tmp}'")
     if any(is_s3(r) for r in roots):
         con.execute("INSTALL httpfs; LOAD httpfs;")
+        # transient S3 503s under heavy concurrent load: retry hard
+        con.execute("SET http_retries = 8; SET http_retry_wait_ms = 1000; "
+                    "SET http_retry_backoff = 2;")
         con.execute(f"""CREATE SECRET (TYPE s3,
             KEY_ID '{os.environ["AWS_ACCESS_KEY_ID"]}',
             SECRET '{os.environ["AWS_SECRET_ACCESS_KEY"]}',
