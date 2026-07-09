@@ -78,6 +78,46 @@ def _fresh_dir(root: str) -> None:
         Path(root).mkdir(parents=True)
 
 
+def est_transform_mem_gb(m: V2Model) -> float:
+    """Empirical peak working set for one model's transform lane: dominated by
+    the per-year bucket temp table (rows × wide width), with hash-agg pivot
+    state of similar order. Calibrated on the full-tier runs: AX_WW4 ≈ 39 GB
+    (26 GB budget spilled; 40 GB didn't), USE4 < 1 GB."""
+    cov = sum(REGIONS[r] for r in m.universe_regions) * m.coverage_rate
+    return max(4.0, cov * m.n_factors * 8 * 261 * 1.3 / 1e9)
+
+
+def plan_lanes(models, total_mem_gb: float, total_threads: int,
+               mem_fraction: float = 0.75) -> list[list[tuple[str, int, int]]]:
+    """Pack models into sequential waves of concurrent no-spill lanes.
+
+    RULE (project decision 2026-07-09): parallelism is calibrated so no lane
+    spills — fewer, fatter lanes beat many spilling ones (measured: a spilling
+    12 GB global lane ran >3x slower than a 40 GB no-spill one, and shared-
+    spill corruption killed three lanes before temp dirs were isolated).
+
+    Returns waves of (model_id, mem_gb, threads).
+    """
+    budget = total_mem_gb * mem_fraction
+    todo = sorted(models, key=est_transform_mem_gb, reverse=True)
+    waves: list[list] = []
+    for m in todo:
+        need = min(est_transform_mem_gb(m), budget)
+        placed = False
+        for wave in waves:
+            if sum(w[1] for w in wave) + need <= budget:
+                wave.append([m.model_id, need, 0])
+                placed = True
+                break
+        if not placed:
+            waves.append([[m.model_id, need, 0]])
+    out = []
+    for wave in waves:
+        thr = max(2, total_threads // len(wave))
+        out.append([(mid, int(round(need)), thr) for mid, need, _ in wave])
+    return out
+
+
 def _is_big(m: V2Model) -> bool:
     cov = sum(REGIONS[r] for r in m.universe_regions) * m.coverage_rate
     nnz = m.n_styles + 2.1 + (2 if m.n_countries else 0)
