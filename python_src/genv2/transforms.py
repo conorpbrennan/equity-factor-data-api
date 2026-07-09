@@ -60,7 +60,20 @@ def _connect(*roots) -> duckdb.DuckDBPyConnection:
 
 
 def _fresh_dir(root: str) -> None:
-    if not is_s3(root):
+    """Guarantee an empty destination. On S3 this DELETES the prefix — cs
+    passes use APPEND, so a retry into a non-empty prefix silently duplicates
+    rows (bit us: a killed run's leftover months coexisted with the rewrite)."""
+    if is_s3(root):
+        import boto3
+        bucket, _, prefix = root.removeprefix("s3://").partition("/")
+        s3 = boto3.client("s3", region_name="eu-west-1")
+        keys = [o["Key"] for page in s3.get_paginator("list_objects_v2")
+                .paginate(Bucket=bucket, Prefix=prefix + "/")
+                for o in page.get("Contents", [])]
+        for i in range(0, len(keys), 1000):
+            s3.delete_objects(Bucket=bucket,
+                              Delete={"Objects": [{"Key": k} for k in keys[i:i+1000]]})
+    else:
         shutil.rmtree(root, ignore_errors=True)
         Path(root).mkdir(parents=True)
 
