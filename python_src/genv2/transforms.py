@@ -42,6 +42,10 @@ def _connect(*roots) -> duckdb.DuckDBPyConnection:
         con.execute(f"SET memory_limit = '{mem}'")
     tmp = os.environ.get("DUCK_TMP")
     if tmp:
+        # per-process subdir: duckdb temp filenames are not unique, so
+        # concurrent lanes sharing one temp dir corrupt each other's spill
+        tmp = f"{tmp}/pid{os.getpid()}"
+        Path(tmp).mkdir(parents=True, exist_ok=True)
         con.execute(f"SET temp_directory = '{tmp}'")
     if any(is_s3(r) for r in roots):
         con.execute("INSTALL httpfs; LOAD httpfs;")
