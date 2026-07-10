@@ -222,6 +222,16 @@ CREATE VIEW v_cs_ax_ww4_mh AS
      only as the canonical source. FMP time-series access (16.7 s cold locally for one factor × 10
      assets × 20 y) is the one dataset still wanting a dual materialization.</p>
 
+  <div class="callout">
+    <p class="h">The PIT overlay, proven end to end</p>
+    <p>On a restated date (2015-02-24, AX_WW4_MH): the generator republished
+       <strong>1,165,931</strong> style values as version 2, of which <strong>80% differ</strong>
+       from the originals. Computing the as-of cross-section by overlay (wide v1 row + version-2
+       join + coalesce) and long-form (arg_max over every version in the normalized store) returns
+       <strong>row-for-row identical results</strong> — in <strong>0.31 s vs 26.9 s</strong>.
+       Reproduce with <span class="mono">python -m pit_demo</span> (repo).</p>
+  </div>
+
   <h2><span class="sect">6</span>The DRILL: "adding a model must never become a project"</h2>
   <p>The review's operational criterion, executed literally: two genuinely new config entries —
      <span class="mono">AX_CA4_MH</span> (small regional) and <span class="mono">BARRA_EUE4_L_SFM1</span>
