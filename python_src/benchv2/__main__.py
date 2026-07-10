@@ -198,9 +198,10 @@ def main(argv=None):
     if args.cmd == "worker":
         worker(args.root, args.arm, args.query, args.mode, args.iters, args.params)
         return 0
-    # C-arm TS1/CS1 scan the multi-100GB normalized store per iteration: 1 cold, 2 warm
-    slow = {("C_normalized", "TS1"): 0.4, ("C_normalized", "CS1"): 0.4,
-            ("C_normalized", "CHAIN1"): 0.4, ("C_normalized", "CHAIN2"): 0.4}
+    # C-arm cells that rebuild from the multi-100GB long store: 1 cold, 2 warm
+    slow = {("C_normalized", q): 0.4 for q in
+            ("CS1", "CS3", "CS4", "CS5", "TS1", "TS2", "TS4", "TS5", "TS6",
+             "CHAIN1", "CHAIN2")}
     skip = {tuple(x.split(":")) for x in args.skip.split(",") if x}
     run(args.root, Path(args.out), args.cold, args.warm, slow, skip)
     return 0

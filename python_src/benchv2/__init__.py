@@ -15,5 +15,7 @@ the arm's data dirs; warm = in-process repeats. No-spill budgets.
 """
 
 ARMS = ("A_permodel", "B_generic", "C_normalized")
-QUERIES = ("CS1", "TS1", "CHAIN1", "CHAIN2")
-SHARED_QUERIES = ("FMP1", "FMP2")
+QUERIES = ("CS1", "CS2", "CS3", "CS4", "CS5", "CS6",
+           "TS1", "TS2", "TS3", "TS4", "TS5", "TS6")
+CHAIN_QUERIES = ("CHAIN1", "CHAIN2")   # measured separately (see results)
+SHARED_QUERIES = ()                     # FMP1/2 measured separately
