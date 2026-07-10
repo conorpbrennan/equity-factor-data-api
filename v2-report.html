@@ -44,6 +44,10 @@
         color: var(--ink-2); margin: .8rem 0; padding: 0 0 0 1rem;
         border-left: 2px solid var(--hairline); overflow-x: auto; }
   .note { font-size: .76rem; color: var(--ink-3); max-width: 78ch; margin: .3rem 0 0; }
+  .callout { border-left: 3px solid var(--accent); padding: .1rem 0 .1rem 1rem;
+             margin: 1.4rem 0; max-width: 74ch; }
+  .callout p { margin: .4rem 0; font-size: .85rem; }
+  .callout .h { font-weight: 650; color: var(--ink); }
   .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 3rem; }
   footer { margin-top: 3.2rem; font-size: .78rem; color: var(--ink-2); max-width: 78ch; }
 </style>
@@ -183,6 +187,22 @@ CREATE VIEW v_cs_ax_ww4_mh AS
      catalog metadata instead of Parquet footers). Ink: the dev box reading its local copy (SATA).
      Orange: the same box querying the S3 store across the Atlantic (~75 ms RTT). Cold = fresh
      process; warm = repeats in-process. p50 seconds.</p>
+  <div class="callout">
+    <p class="h">Reading cold vs warm — what is cached, and what never is</p>
+    <p><strong>Results are never cached:</strong> every warm repeat re-executes the full query —
+       scan, decompress, filter, join, sort, Arrow, Polars. What warm reuses is <em>bytes</em>:
+       locally the OS page cache; remotely DuckDB's in-process range cache, so warm remote repeats
+       move no data across the Atlantic. One S3 cost survives warm for the raw-Parquet arms:
+       file discovery (glob/LIST) re-executes per query — that API traffic is the ~0.5–1.4 s
+       floor under A/B's remote warms, and its absence is why D (catalog-planned, zero S3 calls
+       at plan time) runs warm-from-New-York at local-disk speed.</p>
+    <p><strong>Cold is the uncached truth:</strong> a fresh process each time — page cache evicted
+       locally, the range cache dead by construction remotely (it is per-process; no disk cache is
+       used in these grids). Read warm as "a session re-querying data it already touched", cold as
+       "first touch". One-shot batch workloads live in the cold column, where remote times are
+       bandwidth physics no catalog changes — sync locally or add a persistent range cache
+       (cache_httpfs) if that is your shape.</p>
+  </div>
   <div class="tablewrap"><table id="perf">
     <thead><tr><th class="l">query</th><th colspan="2">A per-model</th><th colspan="2">B generic+views</th><th colspan="2">C normalized</th><th colspan="2">D ducklake</th></tr></thead>
     <tbody></tbody>
