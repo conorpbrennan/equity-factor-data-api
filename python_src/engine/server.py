@@ -61,8 +61,10 @@ class Query(BaseModel):
 def query(q: Query) -> Response:
     global _served
     try:
-        with _lock:                      # one duckdb execution at a time
-            table = CON.cursor().execute(q.sql).fetch_arrow_table()
+        # concurrent cursors on one database instance: shared buffer pool and
+        # range cache, true parallel execution (GIL released inside duckdb)
+        table = CON.cursor().execute(q.sql).fetch_arrow_table()
+        with _lock:
             _served += 1
     except Exception as e:               # surface engine errors to the client
         raise HTTPException(status_code=400, detail=str(e)[:2000])
