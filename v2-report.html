@@ -179,6 +179,74 @@ CREATE VIEW v_cs_ax_ww4_mh AS
      only as the canonical source. FMP time-series access (16.7 s cold locally for one factor × 10
      assets × 20 y) is the one dataset still wanting a dual materialization.</p>
 
+  <h2><span class="sect">A</span>Appendix — full schemas</h2>
+
+  <h3>C — normalized store (canonical source)</h3>
+  <pre>-- dimensions
+model_master(model_id VARCHAR, vendor VARCHAR, model_name VARCHAR, variant VARCHAR,
+             region VARCHAR, n_factors SMALLINT,
+             cov_scaling VARCHAR,               -- 'ann_var_pct2' | 'daily_var'
+             specific_risk_convention VARCHAR,  -- 'ann_vol_pct'  | 'daily_vol'
+             return_convention VARCHAR,         -- 'daily_pct'    | 'daily_dec'
+             base_model_id VARCHAR)             -- non-NULL for custom variants
+factor_master(model_id, factor_id, factor_seq SMALLINT, factor_name,
+              factor_type)                      -- STYLE | INDUSTRY | COUNTRY | CURRENCY | MARKET
+asset_master(asset_id INTEGER, ticker, sector, region,
+             country_code SMALLINT, ccy_code SMALLINT, start_date, end_date)
+asset_xref(asset_id, vendor, vendor_asset_id)
+
+-- facts (hive: model_id=&lt;M&gt;/year=&lt;Y&gt;/data_&lt;chunk&gt;.parquet; monthly chunks at global scale;
+--        in-file sort (cob_date, asset_id, factor_seq); zstd-3; 7-sig-digit values)
+factor_loading(model_id, cob_date DATE, asset_id INTEGER, factor_id,
+               value DOUBLE, version_id SMALLINT)   -- sparse: nonzero rows only
+factor_covariance(model_id, cob_date, factor_id_1, factor_id_2, value, version_id)
+specific_risk(model_id, cob_date, asset_id, value, version_id)
+universe_membership(model_id, cob_date, asset_id, estimation_universe_flag BOOLEAN)
+factor_return(model_id, cob_date, factor_id, value, version_id)
+fmp(model_id, cob_date, factor_id, asset_id, weight DOUBLE, version_id)
+restatement_log/model_id=&lt;M&gt;/log.parquet
+    (model_id, cob_date, version_id, published_date)</pre>
+
+  <h3>A — per-model wide tables (strategy A)</h3>
+  <pre>-- one pair of tables per model; column list generated from factor_master.
+-- example: AX_WW4_MH (248 factors -> 251 columns)
+transforms_a/wide_cs/model_id=AX_WW4_MH/year_month=YYYY-MM/*.parquet
+  (cob_date DATE, asset_id INTEGER,
+   "MARKET_SENSITIVITY" DOUBLE, "MT_MOMENTUM" DOUBLE, … 16 styles …,
+   "IND01" … "IND64",           -- industries, 0.0 when absent
+   "CTY01" … "CTY95",           -- countries,  1.0 for the asset's country
+   "CCY01" … "CCY72",           -- currencies, 1.0 for the asset's currency
+   "MARKET" DOUBLE,
+   specific_risk DOUBLE)
+  -- sorted (cob_date, asset_id) within partition; version 1 only
+
+transforms_a/wide_ts/model_id=AX_WW4_MH/bucket=&lt;asset_id % 32&gt;/data_&lt;year&gt;.parquet
+  (same columns; sorted (asset_id, cob_date) within each file)</pre>
+
+  <h3>B — generic-slot table + slot map + generated views (strategy B)</h3>
+  <pre>-- ONE physical schema for every model, 265 columns
+transforms_b/generic_cs/model_id=&lt;M&gt;/year_month=YYYY-MM/*.parquet
+  (cob_date DATE, asset_id INTEGER, specific_risk DOUBLE,
+   F001 DOUBLE, F002 DOUBLE, … F260 DOUBLE)   -- slot pool ≥ max model + headroom;
+                                              -- slot s = factor_seq s-1; unused slots NULL
+transforms_b/generic_ts/model_id=&lt;M&gt;/bucket=&lt;asset_id % 32&gt;/data_&lt;year&gt;.parquet
+
+factor_slot_map(model_id, slot_id SMALLINT, factor_id, factor_seq SMALLINT,
+                valid_from DATE, valid_to DATE)   -- temporal; slots append-only per model,
+                                                  -- never reused across model revisions
+
+-- generated per-model views: the ONLY human query surface (24 views for 12 models).
+-- the partition column stays exposed — hiding it makes file pruning impossible.
+CREATE OR REPLACE VIEW v_cs_ax_ww4_mh AS
+  SELECT year_month, cob_date, asset_id,
+         F001 AS "MARKET_SENSITIVITY", F002 AS "MT_MOMENTUM", …,
+         F249 AS "MARKET", specific_risk
+  FROM read_parquet('…/generic_cs/model_id=AX_WW4_MH/**/*.parquet',
+                    hive_partitioning=true);</pre>
+  <p class="note">Both wide strategies materialize version 1 only; point-in-time queries overlay
+     normalized version-2 rows (measured at ~0.2 s over the non-PIT twin). Factor covariance is
+     never re-materialized — all strategies share the normalized date-sorted table.</p>
+
   <footer>
     <p>Sources: <span class="mono">generator-spec-v2.md</span> (dimensions + open validation
        questions), <span class="mono">benchmark-results-v2.md</span>, <span class="mono">data/v2bench*/summary.json</span>,
