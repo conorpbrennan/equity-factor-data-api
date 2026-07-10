@@ -64,11 +64,11 @@
     generator</strong> (<span class="mono">python_src/genv2</span>). No vendor data is involved:
     each model in the fleet is a <em>config entry</em> — factor taxonomy, universe regions,
     coverage rates, vendor conventions, dynamics — and the generator turns that config into 20
-    years of daily loadings, covariances, specific risk, factor returns, FMP weights, and
-    restatements. Values are engineered to be realistic <em>where realism affects storage
-    behavior</em>: loadings follow AR(1) with cross-sectional standardization (compression matches
+    years of daily loadings, covariances, specific risk, factor returns, factor-mimicking
+    portfolio (FMP) weights, and restatements. Values are engineered to be realistic <em>where realism affects storage
+    behavior</em>: loadings follow an AR(1) (first-order autoregressive) process with cross-sectional standardization (compression matches
     persistent real data, not incompressible noise), industry/country/currency memberships are
-    near-static one-hots, covariances are PSD by construction, and every number is rounded to
+    near-static one-hots, covariances are positive semi-definite (PSD) by construction, and every number is rounded to
     vendor-file precision. Generation is deterministic — counter-based seeds keyed by
     (seed, model, component, date) — so the same config yields byte-identical Parquet on any
     machine, which §4 exploits as a correctness proof. Adding a model to the fleet is adding a
@@ -83,8 +83,10 @@
   </p>
 
   <h2><span class="sect">1</span>The model fleet — the generator's config</h2>
-  <p>Each row below is a configuration entry the generator materializes in full. The bar is each
-     model's share of loading rows — the two globals and the global variant are ~85% of all data.</p>
+  <p>Each row below is a configuration entry the generator materializes in full (column key:
+     styles·industries·countries·currencies + market; <em>estu</em> = estimation universe, the
+     subset of covered assets used to fit the model). The bar is each model's share of loading
+     rows — the two globals and the global variant are ~85% of all data.</p>
   <div class="tablewrap"><table>
     <thead><tr><th>model</th><th class="l">proxy for</th><th>sty·ind·cty·ccy+mkt</th>
       <th>factors</th><th>coverage</th><th>estu</th><th>loadings/20y</th><th></th></tr></thead>
@@ -118,7 +120,7 @@ fmp(model_id, cob_date, factor_id, asset_id,
 + covariance, specific_risk, membership,
   restatement_log, dimension tables</pre>
       <p class="note">Sparse (nonzero loadings only, ~15–20 rows/asset-day), hive-partitioned
-        model_id/year, monthly-chunked files at global scale. Zero DDL to add a model.</p>
+        model_id/year, monthly-chunked files at global scale; cob_date = close-of-business date. Zero DDL (schema-change statements) to add a model.</p>
     </div>
     <div>
       <h3>A — per-model wide tables</h3>
@@ -152,7 +154,7 @@ CREATE VIEW v_cs_ax_ww4_mh AS
     <tbody>
       <tr><td>CPU</td><td class="l">i7-12700K — 12 cores/20 threads, ≤5.0 GHz x86</td><td class="l">Graviton3 — 16 cores, ~2.6 GHz ARM</td></tr>
       <tr><td>memory</td><td class="l">62 GiB</td><td class="l">128 GiB</td></tr>
-      <tr><td>storage for data</td><td class="l">4 TB SATA SSD (~540 MB/s)</td><td class="l">S3, direct writes (25 Gbps NIC); 950 GB NVMe for spill only</td></tr>
+      <tr><td>storage for data</td><td class="l">4 TB SATA SSD (~540 MB/s)</td><td class="l">S3, direct writes (25 Gbps network interface, NIC); 950 GB NVMe for spill only</td></tr>
       <tr><td>generation (12 models, 5 lanes)</td><td class="l">~1.3 h</td><td class="l">~2.0 h</td></tr>
       <tr><td>fastest global transform (no-spill)</td><td class="l">wide_ts bucket pass 21 min</td><td class="l">AX_WW4 A: 5.4 h cs + 47 min ts</td></tr>
       <tr><td>store produced</td><td class="l">678 GB on ssd4tb</td><td class="l">677 GiB, 26,542 objects on S3</td></tr>
@@ -188,8 +190,9 @@ CREATE VIEW v_cs_ax_ww4_mh AS
      rows. Four arms: the three physical schemas plus <strong>D — DuckLake</strong>, a catalog
      layered over strategy B's generic tables (not a fourth schema: the same bytes, planned from
      catalog metadata instead of Parquet footers). Ink: the dev box reading its local copy (SATA).
-     Orange: the same box querying the S3 store across the Atlantic (~75 ms RTT). Cold = fresh
-     process; warm = repeats in-process. p50 seconds.</p>
+     Orange: the same box querying the S3 store across the Atlantic (~75 ms round-trip time, RTT). Cold = fresh
+     process; warm = repeats in-process; p50 = median. As-of queries are labeled PIT
+     (point-in-time): they reconstruct what was known on a date, honoring restatements. Seconds.</p>
   <div class="callout">
     <p class="h">Reading cold vs warm — what is cached, and what never is</p>
     <p><strong>Results are never cached:</strong> every warm repeat re-executes the full query —
@@ -249,7 +252,7 @@ CREATE VIEW v_cs_ax_ww4_mh AS
   <p>The last mile of the remote story: client-observed <em>cold</em> can only match warm if the
      data stops crossing the ocean — so ship the SQL east and the Arrow result west. The tier is
      deliberately minimal and <strong>entirely open source</strong>: an ~80-line Python service
-     (DuckDB + DuckLake + FastAPI, results as zstd-compressed Arrow IPC) on plain EC2, built from
+     (DuckDB + DuckLake + FastAPI, results as zstd-compressed Arrow IPC — Arrow's binary interchange format — on plain EC2, built from
      scratch by a boot script in ~3 minutes; a ~70-line client balancer (round-robin with a
      pre-query health ping; on any failure it re-reads a text file of engine addresses, pings all,
      and proceeds on the live set). No managed services, no proprietary engine, no load-balancer
@@ -277,7 +280,7 @@ CREATE VIEW v_cs_ax_ww4_mh AS
     </tbody>
   </table></div>
   <div class="tablewrap"><table>
-    <thead><tr><th class="l">concurrency sweep (interactive mix)</th><th>5 × small engines</th><th>1 × large engine</th></tr></thead>
+    <thead><tr><th class="l">concurrency sweep (interactive mix; qps = queries/sec, p95 = 95th-percentile latency)</th><th>5 × small engines</th><th>1 × large engine</th></tr></thead>
     <tbody>
       <tr><td class="l">p50 latency, c=1 → c=10</td><td>0.90s → 0.89s</td><td><b>0.39s → 0.50s</b></td></tr>
       <tr><td class="l">throughput at c=10 (p95)</td><td>6.4 qps (3.0s)</td><td><b>16.3 qps (1.1s)</b></td></tr>
@@ -324,7 +327,7 @@ CREATE VIEW v_cs_ax_ww4_mh AS
       <tr><td class="l">normalized store kept as canonical source</td>
           <td class="l">zero-DDL landing zone for vendor data; feeds all materializations; carries
               the version dimension (§2, §6)</td></tr>
-      <tr><td class="l">optional engine tier for remote-interactive use (one large box, or two for HA)</td>
+      <tr><td class="l">optional engine tier for remote-interactive use (one large box, or two for high availability, HA)</td>
           <td class="l">client cold collapses to result-transfer time — 0.8–1.8 s for anything
               pruned, at any distance; one shared-cache box beats a sharded fleet 2× on latency,
               2.5× on throughput (§7)</td></tr>
