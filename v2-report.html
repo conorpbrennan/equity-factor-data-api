@@ -244,7 +244,51 @@ CREATE VIEW v_cs_ax_ww4_mh AS
      "a project" through object sprawl and hand-maintained DDL, which are exactly what B's mapping
      table eliminates. Under DuckLake, the same operation becomes a transactional commit.</p>
 
-  <h2><span class="sect">7</span>Conclusion — the configuration, and why</h2>
+
+  <h2><span class="sect">7</span>The engine tier: query compute next to the data</h2>
+  <p>The last mile of the remote story: client-observed <em>cold</em> can only match warm if the
+     data stops crossing the ocean — so ship the SQL east and the Arrow result west. The tier is
+     deliberately minimal and <strong>entirely open source</strong>: an ~80-line Python service
+     (DuckDB + DuckLake + FastAPI, results as zstd-compressed Arrow IPC) on plain EC2, built from
+     scratch by a boot script in ~3 minutes; a ~70-line client balancer (round-robin with a
+     pre-query health ping; on any failure it re-reads a text file of engine addresses, pings all,
+     and proceeds on the live set). No managed services, no proprietary engine, no load-balancer
+     appliance — every component is Apache- or MIT-licensed and replaceable in an afternoon.</p>
+  <p>Two topologies were measured from New York against the Dublin data, same 16-vCPU budget:
+     <strong>five small engines</strong> (r7g.large, ~0.75 Gbps NIC and a 10 GB cache each,
+     $0.60/h fleet) versus <strong>one large engine</strong> (r7g.4xlarge, ~15 Gbps, one 90 GB
+     shared cache, concurrent cursors, $0.97/h).</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th class="l">measurement (from NY)</th><th>direct S3 (D arm)</th>
+      <th>5 × small engines</th><th>1 × large engine</th></tr></thead>
+    <tbody>
+      <tr><td class="l">CS1 client-cold / warm</td><td>4.18 / 0.158</td><td>1.72 / 1.82</td><td>1.70 / 1.77</td></tr>
+      <tr><td class="l">TS1 client-cold / warm</td><td>16.5 / 0.076</td><td>0.97 / 0.93</td><td>0.79 / 0.72</td></tr>
+      <tr><td class="l">TS5 client-cold / warm</td><td>35.0 / 0.087</td><td>1.28 / 15.2†</td><td><b>0.84 / 0.50</b></td></tr>
+      <tr><td class="l">TS4 (170 MB result) cold / warm</td><td>121 / 0.894</td><td>9.4 / 12.8†</td><td>7.8 / 7.5</td></tr>
+      <tr><td class="l">interactive mix p50, c=1 → c=10</td><td>—</td><td>0.90s → 0.89s</td><td><b>0.39s → 0.50s</b></td></tr>
+      <tr><td class="l">throughput at c=10 (p95)</td><td>—</td><td>6.4 qps (3.0s)</td><td><b>16.3 qps (1.1s)</b></td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">† the small-fleet anomaly: round-robin dispatched repeats onto engines that had
+     never cached that query — five sharded 10 GB caches mean the fleet is only as warm as its
+     coldest member, and each engine's 0.75 Gbps NIC makes its first GB-scale fetch cost ~15 s.</p>
+  <p><span class="key">Findings.</span> The engine tier achieves its purpose: <strong>client cold ≈
+     client warm on every query</strong> (CS1 1.70 vs 1.77 s; TS5 0.84 vs 0.50 s) because
+     engine-cold is a boot event amortized across all clients, not a per-session tax — and on the
+     big box even that boot event nearly vanishes (in-region fetch at 15 Gbps; DuckLake supplies
+     the plan with zero discovery). Queries returning small results run interactively (0.3–0.8 s,
+     floor = one transatlantic round trip + the health ping); queries returning 100 MB+ results are
+     bounded by result transfer itself — the honest floor of any remote architecture. Between
+     topologies the verdict is one-sided: <strong>one larger instance beats N smaller ones</strong>
+     — 2× lower latency, 2.5× the throughput, no cache sharding, no fleet-warmth choreography, no
+     balancer — at 1.6× the cost. Separate instances remain justified only for fault tolerance
+     (two large boxes behind the same trivial balancer) or once a single NIC saturates
+     (then r7gn, at ~4× bandwidth per size, before sharding). The trade-off the small fleet
+     exposed is general: <em>load balancing and cache locality pull in opposite directions</em> —
+     pooled caches resolve it; sharded ones require prewarming or affinity routing.</p>
+
+  <h2><span class="sect">8</span>Conclusion — the configuration, and why</h2>
   <p><span class="key">Recommended configuration: one generic-slot wide table per layout
      (strategy B), dual-materialized date-major and asset-major, managed by a DuckLake catalog,
      over the normalized store as canonical source, with point-in-time served by version
@@ -267,6 +311,10 @@ CREATE VIEW v_cs_ax_ww4_mh AS
       <tr><td class="l">normalized store kept as canonical source</td>
           <td class="l">zero-DDL landing zone for vendor data; feeds all materializations; carries
               the version dimension (§2, §6)</td></tr>
+      <tr><td class="l">optional engine tier for remote-interactive use (one large box, or two for HA)</td>
+          <td class="l">client cold collapses to result-transfer time — 0.8–1.8 s for anything
+              pruned, at any distance; one shared-cache box beats a sharded fleet 2× on latency,
+              2.5× on throughput (§7)</td></tr>
       <tr><td class="l">PIT via version overlay, not materialized versions</td>
           <td class="l">as-of queries cost ~0.1–0.2 s over their non-PIT twins on wide layouts vs
               26 s pivoted with arg_max (§5, CS5/TS6) — restatements are ~1% of dates, so
