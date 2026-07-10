@@ -334,7 +334,7 @@ const PERF = {
   "TS5 — tall-thin: 10 assets × 2 cols × 20y":     {A: [2.12, 0.085, 32.18, 0.703], B: [1.66, 0.086, 36.41, 0.719], C: [83.27, 41.769, null, null], D: [3.23, 0.125, 35.03, 0.087]},
   "TS6 — as-of (PIT) single-asset history":        {A: [1.11, 0.227, 75.12, 1.370], B: [1.08, 0.224, 64.86, 1.417], C: [73.87, 23.056, null, null], D: [3.54, 0.319, 67.51, 0.711]},
 };
-const SKIPPED = "All wide-arm cells use partition predicates. C's remote cells were never run (~150 GB egress each — locally disqualified). D remote warms are the standout: the catalog plans without touching S3, and DuckDB's range cache serves repeats — warm-from-New-York equals warm-from-local-disk.";
+const SKIPPED = "All wide-arm cells use partition predicates. C's remote cells were not run — for asset-sliced queries (TS1/TS5/TS6) that is structural: the long store's files each contain every asset, so no catalog or predicate can prune them and one asset's history drags ~40-50 GB across the wire; date-sliced C cells would be feasible (~1 GB each) but are already disqualified by their local compute times. D remote warms are the standout: catalog planning touches no S3 at all, and the range cache serves repeats — warm-from-New-York equals warm-from-local-disk.";
 
 const fmt = v => v == null ? "·" : v < 0.0995 ? (v*1000).toFixed(0)+"ms" : v.toFixed(2)+"s";
 const tb = document.querySelector("#perf tbody");
