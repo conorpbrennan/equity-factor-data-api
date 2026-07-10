@@ -33,6 +33,13 @@ def _duck(root: str):
     if tmp:
         Path(f"{tmp}/pid{os.getpid()}").mkdir(parents=True, exist_ok=True)
         con.execute(f"SET temp_directory = '{tmp}/pid{os.getpid()}'")
+    if root.startswith("s3://"):
+        con.execute("INSTALL httpfs; LOAD httpfs;")
+        con.execute("SET http_retries = 8; SET http_retry_wait_ms = 1000;")
+        con.execute(f"""CREATE SECRET (TYPE s3,
+            KEY_ID '{os.environ["AWS_ACCESS_KEY_ID"]}',
+            SECRET '{os.environ["AWS_SECRET_ACCESS_KEY"]}',
+            REGION 'eu-west-1')""")
     return con
 
 
@@ -91,6 +98,8 @@ ARM_DIRS = {
 
 
 def evict(root: str, arm: str):
+    if root.startswith("s3://"):
+        return   # remote cold = fresh process (client caches die with it)
     p = paths(root)
     dirs = [p[k] for k in ARM_DIRS[arm]] + [p["mem"], p["cov"], p["fret"], p["fmp"]]
     for d in dirs:
@@ -111,7 +120,7 @@ def _p(vals, q):
     return s[min(len(s) - 1, round(q * (len(s) - 1)))]
 
 
-def run(root: str, out_dir: Path, cold_iters: int, warm_iters: int, slow_scale: dict):
+def run(root: str, out_dir: Path, cold_iters: int, warm_iters: int, slow_scale: dict, skip=frozenset()):
     out_dir.mkdir(parents=True, exist_ok=True)
     params_file = out_dir / "params.json"
     if not params_file.exists():
@@ -132,6 +141,9 @@ def run(root: str, out_dir: Path, cold_iters: int, warm_iters: int, slow_scale: 
 
     for qid in QUERIES:
         for arm in ARMS:
+            if (arm, qid) in skip:
+                print(f"skip {arm}/{qid}")
+                continue
             cell(arm, qid)
     for qid in SHARED_QUERIES:      # same physical path for every arm
         cell("A_permodel", qid)
@@ -171,6 +183,7 @@ def main(argv=None):
             pp.add_argument("--out", default="data/v2bench")
             pp.add_argument("--cold", type=int, default=3)
             pp.add_argument("--warm", type=int, default=5)
+            pp.add_argument("--skip", default="", help="comma list arm:query to skip")
         if name == "worker":
             pp.add_argument("--arm", required=True)
             pp.add_argument("--query", required=True)
@@ -188,7 +201,8 @@ def main(argv=None):
     # C-arm TS1/CS1 scan the multi-100GB normalized store per iteration: 1 cold, 2 warm
     slow = {("C_normalized", "TS1"): 0.4, ("C_normalized", "CS1"): 0.4,
             ("C_normalized", "CHAIN1"): 0.4, ("C_normalized", "CHAIN2"): 0.4}
-    run(args.root, Path(args.out), args.cold, args.warm, slow)
+    skip = {tuple(x.split(":")) for x in args.skip.split(",") if x}
+    run(args.root, Path(args.out), args.cold, args.warm, slow, skip)
     return 0
 
 
