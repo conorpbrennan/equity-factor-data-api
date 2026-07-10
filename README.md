@@ -61,6 +61,17 @@ fresh process starts warm: measured first-touch drops from seconds to
   NVMe (14–27 ms)** while plain Parquet-over-S3 pays ~30× in metadata round
   trips. Cold full-store scans cost ~50 s — sync, or don't scan remotely.
 
+## V2: the fleet-scale tier
+
+Following practitioner review, `python_src/genv2/` generates a 12-model fleet
+(2 global AXWW4-scale + 8 regional + 2 custom variants; 248-factor globals,
+58k coverage) with factor returns, FMPs, and restatements — ~180 GB
+normalized, ~680 GB with both storage strategies materialized (per-model wide
+tables vs a single generic-slot table with generated views). Built twice from
+the same seeds — locally (x86) and on EC2 (Graviton) writing directly to S3 —
+with sampled outputs verified **byte-identical across architectures**.
+Spec: `generator-spec-v2.md`. Commands: `genv2 generate|validate|transforms|plan`.
+
 ## Reproducing the full pipeline
 
 Generation (~1 min), transforms (~5 min), and the benchmark grids are all
