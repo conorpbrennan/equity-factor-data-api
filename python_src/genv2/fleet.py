@@ -154,12 +154,19 @@ FLEET: dict[str, V2Model] = {m.model_id: m for m in [
     _barra("BARRA_USE4_L_SFM1", "USE4", BARRA_STYLES + ("SFM_QUAL1", "SFM_QUAL2"),
            60, ("US",), cov=1.0, estu=0.9,
            base_model_id="BARRA_USE4_L", n_base_styles=len(BARRA_STYLES)),
+    # ---- DRILL additions (2026-07-10): the add-a-model exercise -----------
+    _axioma("AX_CA4_MH", "CA4", AXIOMA_STYLES, 28, ("US",),
+            cov=0.2, estu=0.6),                      # Canada-like small regional
+    _barra("BARRA_EUE4_L_SFM1", "EUE4", BARRA_STYLES + ("SFM_ESG1", "SFM_ESG2"),
+           50, ("EU",), cov=1.0, estu=2_500 / 6_000, n_cty=24, n_ccy=12,
+           base_model_id="BARRA_EUE4_L", n_base_styles=len(BARRA_STYLES)),
 ]}
 
 TIERS = {
     "dev": ["BARRA_USE4_L", "AX_US4_MH", "BARRA_JPE4_L", "AX_JP4_MH",
             "BARRA_USE4_L_SFM1"],
-    "full": list(FLEET),
+    "full": [m for m in FLEET if m not in ("AX_CA4_MH", "BARRA_EUE4_L_SFM1")],
+    "drill": ["AX_CA4_MH", "BARRA_EUE4_L_SFM1"],
 }
 
 

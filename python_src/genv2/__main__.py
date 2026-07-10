@@ -15,12 +15,12 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="genv2")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_plan = sub.add_parser("plan", help="no-spill lane plan for a box")
-    p_plan.add_argument("--tier", choices=("dev", "full"), default="full")
+    p_plan.add_argument("--tier", default="full")
     p_plan.add_argument("--mem-gb", type=float, required=True)
     p_plan.add_argument("--threads", type=int, required=True)
     for name in ("generate", "validate", "transforms"):
         p = sub.add_parser(name)
-        p.add_argument("--tier", choices=("dev", "full"), default="dev")
+        p.add_argument("--tier", default="dev")  # any key of fleet.TIERS
         p.add_argument("--output", default=None, help="override output root")
         p.add_argument("--checkpoints", default=None)
         if name == "generate":
