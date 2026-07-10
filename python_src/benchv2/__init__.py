@@ -14,7 +14,7 @@ store is shared by every arm). Cold = fresh process + fadvise eviction of
 the arm's data dirs; warm = in-process repeats. No-spill budgets.
 """
 
-ARMS = ("A_permodel", "B_generic", "C_normalized")
+ARMS = ("A_permodel", "B_generic", "C_normalized", "D_ducklake", "E_engine")
 QUERIES = ("CS1", "CS2", "CS3", "CS4", "CS5", "CS6",
            "TS1", "TS2", "TS3", "TS4", "TS5", "TS6")
 CHAIN_QUERIES = ("CHAIN1", "CHAIN2")   # measured separately (see results)

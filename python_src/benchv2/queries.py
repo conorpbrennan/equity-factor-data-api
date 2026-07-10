@@ -46,6 +46,10 @@ def _wide_cs(p, arm):
     metadata parsing if globbed blind)."""
     if arm == "A_permodel":
         return f"read_parquet('{p['wide_cs']}/**/*.parquet', hive_partitioning=true)"
+    if arm in ("D_ducklake", "E_engine"):
+        named = ", ".join(f'F{seq + 1:03d} AS "{fid}"' for seq, fid in enumerate(M.factor_ids))
+        return (f"(SELECT year_month, cob_date, asset_id, {named}, specific_risk "
+                f"FROM dl.generic_cs_ax_ww4)")
     named = ", ".join(f'F{seq + 1:03d} AS "{fid}"' for seq, fid in enumerate(M.factor_ids))
     return (f"(SELECT year_month, cob_date, asset_id, {named}, specific_risk "
             f"FROM read_parquet('{p['gen_cs']}/**/*.parquet', hive_partitioning=true))")
@@ -55,6 +59,10 @@ def _wide_ts(p, arm):
     """Asset-major relation, exposing the bucket partition column."""
     if arm == "A_permodel":
         return f"read_parquet('{p['wide_ts']}/**/*.parquet', hive_partitioning=true)"
+    if arm in ("D_ducklake", "E_engine"):
+        named = ", ".join(f'F{seq + 1:03d} AS "{fid}"' for seq, fid in enumerate(M.factor_ids))
+        return (f"(SELECT bucket, cob_date, asset_id, {named}, specific_risk "
+                f"FROM dl.generic_ts_ax_ww4)")
     named = ", ".join(f'F{seq + 1:03d} AS "{fid}"' for seq, fid in enumerate(M.factor_ids))
     return (f"(SELECT bucket, cob_date, asset_id, {named}, specific_risk "
             f"FROM read_parquet('{p['gen_ts']}/**/*.parquet', hive_partitioning=true))")

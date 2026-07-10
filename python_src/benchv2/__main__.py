@@ -40,6 +40,10 @@ def _duck(root: str):
             KEY_ID '{os.environ["AWS_ACCESS_KEY_ID"]}',
             SECRET '{os.environ["AWS_SECRET_ACCESS_KEY"]}',
             REGION 'eu-west-1')""")
+    cat = os.environ.get("DUCKLAKE_CATALOG")
+    if cat:
+        con.execute("INSTALL ducklake;")
+        con.execute(f"ATTACH 'ducklake:{cat}' AS dl (READ_ONLY)")
     return con
 
 
@@ -66,6 +70,44 @@ def resolve_params(root: str) -> dict:
 def worker(root: str, arm: str, qid: str, mode: str, iters: int, params_file: str):
     import polars as pl
     prm = json.loads(Path(params_file).read_text())
+
+    if arm == "E_engine":
+        import itertools
+        import pyarrow.ipc
+        import requests
+        # client-side round-robin over the engine fleet (comma-separated URLs)
+        urls = [u.rstrip("/") for u in os.environ["ENGINE_URL"].split(",")]
+        rr = itertools.cycle(urls)
+        sessions = {u: requests.Session() for u in urls}
+
+        def run_once(_con=None):
+            rows = 0
+            for sql in build(qid, arm, root, prm["hundred"], prm["ts_asset"]):
+                u = next(rr)
+                r = sessions[u].post(f"{u}/query", json={"sql": sql}, timeout=900)
+                r.raise_for_status()
+                df = pl.from_arrow(pa_read(r.content))
+                rows += df.height
+            return rows
+
+        def pa_read(b):
+            import pyarrow as pa
+            return pa.ipc.open_stream(b).read_all()
+
+        if mode == "cold":
+            t0 = time.perf_counter()
+            rows = run_once()
+            print(json.dumps({"arm": arm, "query": qid, "mode": "cold",
+                              "seconds": round(time.perf_counter() - t0, 4), "rows": rows}))
+            return
+        run_once()
+        for _ in range(iters):
+            t0 = time.perf_counter()
+            rows = run_once()
+            print(json.dumps({"arm": arm, "query": qid, "mode": "warm",
+                              "seconds": round(time.perf_counter() - t0, 4), "rows": rows}),
+                  flush=True)
+        return
 
     def run_once(con):
         rows = 0
@@ -94,6 +136,8 @@ ARM_DIRS = {
     "A_permodel": ("wide_cs", "wide_ts"),
     "B_generic": ("gen_cs", "gen_ts"),
     "C_normalized": ("loading", "srisk"),
+    "D_ducklake": (),        # data dirs handled below
+    "E_engine": (),          # nothing client-side to evict; engine stays warm by design
 }
 
 
@@ -102,6 +146,8 @@ def evict(root: str, arm: str):
         return   # remote cold = fresh process (client caches die with it)
     p = paths(root)
     dirs = [p[k] for k in ARM_DIRS[arm]] + [p["mem"], p["cov"], p["fret"], p["fmp"]]
+    if arm == "D_ducklake":
+        dirs.append(f"{root}/ducklake_data")
     for d in dirs:
         base = Path(d)
         if not base.exists():
