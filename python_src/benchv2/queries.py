@@ -41,20 +41,22 @@ def paths(root: str) -> dict:
 
 
 def _wide_cs(p, arm):
-    """The date-major relation for an arm: named columns either physical (A)
-    or via slot aliasing exactly as the generated views define it (B)."""
+    """Date-major relation, exposing the year_month partition column so
+    queries can prune files (a 251-column footer x 240 files is ~160 ms of
+    metadata parsing if globbed blind)."""
     if arm == "A_permodel":
         return f"read_parquet('{p['wide_cs']}/**/*.parquet', hive_partitioning=true)"
     named = ", ".join(f'F{seq + 1:03d} AS "{fid}"' for seq, fid in enumerate(M.factor_ids))
-    return (f"(SELECT cob_date, asset_id, {named}, specific_risk "
+    return (f"(SELECT year_month, cob_date, asset_id, {named}, specific_risk "
             f"FROM read_parquet('{p['gen_cs']}/**/*.parquet', hive_partitioning=true))")
 
 
 def _wide_ts(p, arm):
+    """Asset-major relation, exposing the bucket partition column."""
     if arm == "A_permodel":
         return f"read_parquet('{p['wide_ts']}/**/*.parquet', hive_partitioning=true)"
     named = ", ".join(f'F{seq + 1:03d} AS "{fid}"' for seq, fid in enumerate(M.factor_ids))
-    return (f"(SELECT cob_date, asset_id, {named}, specific_risk "
+    return (f"(SELECT bucket, cob_date, asset_id, {named}, specific_risk "
             f"FROM read_parquet('{p['gen_ts']}/**/*.parquet', hive_partitioning=true))")
 
 
@@ -73,6 +75,18 @@ def _pivot(p, where):
     """
 
 
+BUCKETS = 32
+
+
+def _mon(d: str) -> str:
+    return f"year_month = '{d[:7]}'"
+
+
+def _bkt(assets) -> str:
+    bs = sorted({a % BUCKETS for a in assets})
+    return f"bucket IN ({', '.join(map(str, bs))})" if len(bs) < BUCKETS else "TRUE"
+
+
 def build(qid: str, arm: str, root: str, hundred: list[int], ts_asset: int) -> list[str]:
     p = paths(root)
     ids = ", ".join(map(str, hundred))
@@ -83,23 +97,24 @@ def build(qid: str, arm: str, root: str, hundred: list[int], ts_asset: int) -> l
     if qid == "CS1":
         if arm == "C_normalized":
             return [f"SELECT * FROM ({_pivot(p, on_cs_date)}) ORDER BY asset_id"]
-        return [f"SELECT * FROM {_wide_cs(p, arm)} "
-                f"WHERE cob_date = DATE '{CS_DATE}' ORDER BY asset_id"]
+        return [f"SELECT * EXCLUDE (year_month) FROM {_wide_cs(p, arm)} "
+                f"WHERE {_mon(CS_DATE)} AND cob_date = DATE '{CS_DATE}' ORDER BY asset_id"]
 
     if qid == "TS1":
         if arm == "C_normalized":
             return [f"SELECT * FROM ({_pivot(p, f'asset_id = {ts_asset}')}) ORDER BY cob_date"]
-        return [f"SELECT * FROM {_wide_ts(p, arm)} "
-                f"WHERE asset_id = {ts_asset} ORDER BY cob_date"]
+        return [f"SELECT * EXCLUDE (bucket) FROM {_wide_ts(p, arm)} "
+                f"WHERE bucket = {ts_asset} % {BUCKETS} AND asset_id = {ts_asset} "
+                f"ORDER BY cob_date"]
 
     if qid == "CHAIN1":   # loadings for 100 names, latest date -> returns 5y
         if arm == "C_normalized":
             first = (f"SELECT * FROM ({_pivot(p, on_last_date)}) "
                      f"WHERE asset_id IN ({ids}) ORDER BY asset_id")
         else:
-            first = (f"SELECT * FROM {_wide_cs(p, arm)} "
-                     f"WHERE cob_date = DATE '{LAST_DATE}' AND asset_id IN ({ids}) "
-                     f"ORDER BY asset_id")
+            first = (f"SELECT * EXCLUDE (year_month) FROM {_wide_cs(p, arm)} "
+                     f"WHERE {_mon(LAST_DATE)} AND cob_date = DATE '{LAST_DATE}' "
+                     f"AND asset_id IN ({ids}) ORDER BY asset_id")
         return [first,
                 f"SELECT cob_date, factor_id, value "
                 f"FROM read_parquet('{p['fret']}/**/*.parquet') "
@@ -118,14 +133,14 @@ def build(qid: str, arm: str, root: str, hundred: list[int], ts_asset: int) -> l
                      f"WHERE cob_date = DATE '{CS_DATE}' AND version_id = 1 ORDER BY asset_id")
         else:
             first = f"""
-                SELECT w.* FROM {_wide_cs(p, arm)} w
+                SELECT w.* EXCLUDE (year_month) FROM {_wide_cs(p, arm)} w
                 JOIN read_parquet('{p["mem"]}/**/*.parquet') u
                   ON u.cob_date = w.cob_date AND u.asset_id = w.asset_id
                  AND u.estimation_universe_flag
-                WHERE w.cob_date = DATE '{CS_DATE}'
+                WHERE w.{_mon(CS_DATE)} AND w.cob_date = DATE '{CS_DATE}'
                 ORDER BY w.asset_id"""
             third = (f"SELECT asset_id, specific_risk FROM {_wide_cs(p, arm)} "
-                     f"WHERE cob_date = DATE '{CS_DATE}' ORDER BY asset_id")
+                     f"WHERE {_mon(CS_DATE)} AND cob_date = DATE '{CS_DATE}' ORDER BY asset_id")
         return [first,
                 f"SELECT factor_id_1, factor_id_2, value "
                 f"FROM read_parquet('{p['cov']}/**/*.parquet') "
@@ -150,7 +165,8 @@ def build(qid: str, arm: str, root: str, hundred: list[int], ts_asset: int) -> l
                   AND l.asset_id IN ({mem})
                 GROUP BY 1 ORDER BY 1"""]
         return [f"SELECT asset_id, {five} FROM {_wide_cs(p, arm)} "
-                f"WHERE cob_date = DATE '{CS_DATE}' AND asset_id IN ({mem}) ORDER BY asset_id"]
+                f"WHERE {_mon(CS_DATE)} AND cob_date = DATE '{CS_DATE}' "
+                f"AND asset_id IN ({mem}) ORDER BY asset_id"]
 
     if qid == "CS3":     # full risk-model pull: cross-section + covariance + srisk
         return build("CHAIN2", arm, root, hundred, ts_asset)
@@ -159,9 +175,9 @@ def build(qid: str, arm: str, root: str, hundred: list[int], ts_asset: int) -> l
         if arm == "C_normalized":
             return [f"""SELECT * FROM ({_pivot(p, on_cs_date)})
                         WHERE "{COUNTRY_FACTOR}" = 1.0 ORDER BY asset_id"""]
-        return [f"SELECT * FROM {_wide_cs(p, arm)} "
-                f"WHERE cob_date = DATE '{CS_DATE}' AND \"{COUNTRY_FACTOR}\" = 1.0 "
-                f"ORDER BY asset_id"]
+        return [f"SELECT * EXCLUDE (year_month) FROM {_wide_cs(p, arm)} "
+                f"WHERE {_mon(CS_DATE)} AND cob_date = DATE '{CS_DATE}' "
+                f"AND \"{COUNTRY_FACTOR}\" = 1.0 ORDER BY asset_id"]
 
     if qid == "CS5":     # as-of (PIT) cross-section on a restated date: latest version wins
         if arm == "C_normalized":
@@ -191,7 +207,7 @@ def build(qid: str, arm: str, root: str, hundred: list[int], ts_asset: int) -> l
             SELECT w.asset_id, {keep}, {rest}, w.specific_risk
             FROM {_wide_cs(p, arm)} w
             LEFT JOIN overlay o USING (asset_id)
-            WHERE w.cob_date = DATE '{RESTATED_DATE}'
+            WHERE w.{_mon(RESTATED_DATE)} AND w.cob_date = DATE '{RESTATED_DATE}'
             ORDER BY w.asset_id"""]
 
     if qid == "CS6":     # screen: top-decile momentum within estu, one date, styles returned
@@ -200,7 +216,8 @@ def build(qid: str, arm: str, root: str, hundred: list[int], ts_asset: int) -> l
         if arm == "C_normalized":
             src = f"({_pivot(p, on_cs_date)})"
         else:
-            src = f"(SELECT * FROM {_wide_cs(p, arm)} WHERE cob_date = DATE '{CS_DATE}')"
+            src = (f"(SELECT * FROM {_wide_cs(p, arm)} "
+                   f"WHERE {_mon(CS_DATE)} AND cob_date = DATE '{CS_DATE}')")
         return [f"""
             SELECT asset_id, {five}
             FROM {src}
@@ -219,7 +236,7 @@ def build(qid: str, arm: str, root: str, hundred: list[int], ts_asset: int) -> l
                 GROUP BY 1, 2 ORDER BY 2, 1"""]
         return [f"""
             SELECT cob_date, asset_id, {ts2f} FROM {_wide_ts(p, arm)}
-            WHERE asset_id IN ({ids})
+            WHERE {_bkt(hundred)} AND asset_id IN ({ids})
               AND cob_date BETWEEN DATE '{TS2_RANGE[0]}' AND DATE '{TS2_RANGE[1]}'
             ORDER BY asset_id, cob_date"""]
 
@@ -238,7 +255,8 @@ def build(qid: str, arm: str, root: str, hundred: list[int], ts_asset: int) -> l
         else:
             src = f"""
                 SELECT cob_date, asset_id, "{TS4_FACTOR}" AS x FROM {_wide_cs(p, arm)}
-                WHERE cob_date BETWEEN DATE '{TS4_RANGE[0]}' AND DATE '{TS4_RANGE[1]}'"""
+                WHERE year_month BETWEEN '{TS4_RANGE[0][:7]}' AND '{TS4_RANGE[1][:7]}'
+                  AND cob_date BETWEEN DATE '{TS4_RANGE[0]}' AND DATE '{TS4_RANGE[1]}'"""
         return [f"""
             WITH panel AS ({src})
             SELECT * FROM panel
@@ -261,7 +279,8 @@ def build(qid: str, arm: str, root: str, hundred: list[int], ts_asset: int) -> l
                 GROUP BY 1, 2 ORDER BY 2, 1"""]
         return [f"""
             SELECT cob_date, asset_id, "{TS4_FACTOR}", specific_risk
-            FROM {_wide_ts(p, arm)} WHERE asset_id IN ({ten})
+            FROM {_wide_ts(p, arm)}
+            WHERE {_bkt(hundred[:10])} AND asset_id IN ({ten})
             ORDER BY asset_id, cob_date"""]
 
     if qid == "TS6":     # as-of (PIT) single-asset history: latest version wins
@@ -291,7 +310,7 @@ def build(qid: str, arm: str, root: str, hundred: list[int], ts_asset: int) -> l
             SELECT w.cob_date, {keep}, {rest}, w.specific_risk
             FROM {_wide_ts(p, arm)} w
             LEFT JOIN overlay o USING (cob_date)
-            WHERE w.asset_id = {ts_asset}
+            WHERE w.bucket = {ts_asset} % {BUCKETS} AND w.asset_id = {ts_asset}
             ORDER BY w.cob_date"""]
 
     if qid == "FMP1":     # shared: one factor's full weight vector, one date
