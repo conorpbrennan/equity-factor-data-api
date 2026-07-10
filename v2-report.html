@@ -53,16 +53,31 @@
   <p class="eyebrow">Equity factor data API · V2 report · 2026-07-10</p>
   <h1>The v2 factor store: twelve models, three schemas, two machines, one dataset</h1>
   <p>
-    V2 scales the benchmark to practitioner-reviewed dimensions: a ten-vendor-model fleet plus two
-    custom variants, global models at AXWW4 size, factor returns, factor-mimicking portfolios, and
-    restatements. The full tier was built twice from the same seeds — on this dev box and on EC2
-    writing directly to S3 — then verified equivalent, and the three candidate physical schemas were
-    benchmarked against each other at global scale, locally and across the Atlantic.
+    Everything in this report rests on <strong>synthetic data produced by a purpose-built
+    generator</strong> (<span class="mono">python_src/genv2</span>). No vendor data is involved:
+    each model in the fleet is a <em>config entry</em> — factor taxonomy, universe regions,
+    coverage rates, vendor conventions, dynamics — and the generator turns that config into 20
+    years of daily loadings, covariances, specific risk, factor returns, FMP weights, and
+    restatements. Values are engineered to be realistic <em>where realism affects storage
+    behavior</em>: loadings follow AR(1) with cross-sectional standardization (compression matches
+    persistent real data, not incompressible noise), industry/country/currency memberships are
+    near-static one-hots, covariances are PSD by construction, and every number is rounded to
+    vendor-file precision. Generation is deterministic — counter-based seeds keyed by
+    (seed, model, component, date) — so the same config yields byte-identical Parquet on any
+    machine, which §4 exploits as a correctness proof. Adding a model to the fleet is adding a
+    config entry; nothing downstream is hand-built.
+  </p>
+  <p>
+    V2 scales this to practitioner-reviewed dimensions: a ten-vendor-model fleet plus two custom
+    variants, global models at AXWW4 size, and the full daily data load. The tier was built twice
+    from the same seeds — on this dev box and on EC2 writing directly to S3 — then verified
+    equivalent, and the three candidate physical schemas were benchmarked against each other at
+    global scale, locally and across the Atlantic.
   </p>
 
-  <h2><span class="sect">1</span>The model fleet</h2>
-  <p>Twelve models spanning the review's dimensions. The bar is each model's share of loading rows —
-     the two globals and the global variant are ~85% of all data.</p>
+  <h2><span class="sect">1</span>The model fleet — the generator's config</h2>
+  <p>Each row below is a configuration entry the generator materializes in full. The bar is each
+     model's share of loading rows — the two globals and the global variant are ~85% of all data.</p>
   <div class="tablewrap"><table>
     <thead><tr><th>model</th><th class="l">proxy for</th><th>sty·ind·cty·ccy+mkt</th>
       <th>factors</th><th>coverage</th><th>estu</th><th>loadings/20y</th><th></th></tr></thead>
