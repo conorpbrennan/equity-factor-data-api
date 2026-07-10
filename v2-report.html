@@ -18,6 +18,8 @@
   main { max-width: 1000px; margin: 0 auto; }
   .eyebrow { font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
              color: var(--ink-3); margin: 0 0 .6rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
   h1 { font-size: 1.55rem; font-weight: 650; margin: 0 0 .45rem; text-wrap: balance; }
   h2 { font-size: 1.08rem; font-weight: 650; margin: 3.2rem 0 .3rem; }
   h2 .sect { color: var(--ink-3); font-weight: 500; margin-right: .5rem; }
@@ -54,7 +56,8 @@
 </head>
 <body>
 <main>
-  <p class="eyebrow">Equity factor data API · V2 report · 2026-07-10</p>
+  <p class="eyebrow">Equity factor data API · V2 report · 2026-07-10 ·
+     <a href="https://github.com/conorpbrennan/equity-factor-data-api">github.com/conorpbrennan/equity-factor-data-api</a></p>
   <h1>The v2 factor store: twelve models, three schemas, two machines, one dataset</h1>
   <p>
     Everything in this report rests on <strong>synthetic data produced by a purpose-built
@@ -240,6 +243,77 @@ CREATE VIEW v_cs_ax_ww4_mh AS
      conclusion: adding a model is a <em>1–12 minute compute job</em> either way — it only becomes
      "a project" through object sprawl and hand-maintained DDL, which are exactly what B's mapping
      table eliminates. Under DuckLake, the same operation becomes a transactional commit.</p>
+
+  <h2><span class="sect">7</span>Conclusion — the configuration, and why</h2>
+  <p><span class="key">Recommended configuration: one generic-slot wide table per layout
+     (strategy B), dual-materialized date-major and asset-major, managed by a DuckLake catalog,
+     over the normalized store as canonical source, with point-in-time served by version
+     overlay.</span> Every clause of that sentence is there because a measurement put it there:</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th class="l">clause</th><th class="l">evidence</th></tr></thead>
+    <tbody>
+      <tr><td class="l">wide, dual-materialized (date-major + asset-major)</td>
+          <td class="l">wide beats pivot-at-query on all 12 queries, 2×–500× (§5); asset-sliced
+              queries are structurally unprunable in any date-organized layout — locality is the
+              only fix (§5 note)</td></tr>
+      <tr><td class="l">generic-slot table, not per-model tables</td>
+          <td class="l">B ≈ A on every query, both locations, cold and warm (§5); adding a model =
+              0.5 s of metadata + zero new tables vs A's two tables per model per layout, forever
+              (§6)</td></tr>
+      <tr><td class="l">DuckLake catalog on top</td>
+          <td class="l">wins every warm remote cell — 76–125 ms from an ocean away, equal to local
+              disk — by eliminating per-query S3 LIST/footer work (§5); turns add-a-model into a
+              transactional commit (§6)</td></tr>
+      <tr><td class="l">normalized store kept as canonical source</td>
+          <td class="l">zero-DDL landing zone for vendor data; feeds all materializations; carries
+              the version dimension (§2, §6)</td></tr>
+      <tr><td class="l">PIT via version overlay, not materialized versions</td>
+          <td class="l">as-of queries cost ~0.1–0.2 s over their non-PIT twins on wide layouts vs
+              26 s pivoted with arg_max (§5, CS5/TS6) — restatements are ~1% of dates, so
+              materializing v2 everywhere would double storage for a corner case</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Configurations discounted, and why</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th class="l">configuration</th><th class="l">why not</th></tr></thead>
+    <tbody>
+      <tr><td class="l">normalized-only (query the long store)</td>
+          <td class="l">8–500× slower on risk-model workloads at global scale; 26 s PIT
+              cross-sections; 42 s warm tall-thin scans; asset histories untenable (§5). Fine only
+              for narrow date-sliced descriptor pulls.</td></tr>
+      <tr><td class="l">per-model wide tables (strategy A) as the fleet surface</td>
+          <td class="l">identical query performance to B — so its only differentiator is cost: two
+              new physical tables per model per layout, compounding across 10+ vendor models plus
+              variants; schema churn on every model revision. The drill showed no offsetting
+              speed advantage (§6).</td></tr>
+      <tr><td class="l">one unified wide table with named factor columns</td>
+          <td class="l">rejected at design time (v1 plan): union of all models' factor names ⇒
+              NULL-riddled schema that churns on every revision, and cross-model column collisions
+              (MOMENTUM ≠ MT_MOMENTUM) invite silent wrong-model reads — the failure mode B's
+              generated views make loud.</td></tr>
+      <tr><td class="l">single compromise layout (only date-major, or only asset-major)</td>
+          <td class="l">the wrong-layout penalty is ~12× locally and structural over S3
+              (asset-sliced queries against date-organized files read the whole store, §5 note);
+              the second materialization costs ~19 s–2 h per model once, and repays it on every
+              query.</td></tr>
+      <tr><td class="l">materializing restated versions into the wide tables</td>
+          <td class="l">doubles wide storage for ~1% of dates; the overlay join achieves as-of
+              correctness at ~0.2 s (§5). Revisit only if restatement rates are far higher than
+              assumed (spec §6 question).</td></tr>
+      <tr><td class="l">raw Parquet without a catalog (no DuckLake)</td>
+          <td class="l">workable locally with disciplined partition predicates, but remotely pays
+              per-query LIST/footer round trips (~0.5–1.4 s warm floor, 3× cold penalty before the
+              fix) and offers no transactions, snapshots, or atomic model adds (§5, §6).</td></tr>
+      <tr><td class="l">typed generic pools (Cn_Int / Cn_VarChar / Cn_Float)</td>
+          <td class="l">the generalized form of B — unneeded here because factor payloads are
+              uniformly DOUBLE; the float-only slot pool achieves the same add-a-model property
+              with a simpler schema (§2). Becomes relevant only if heterogeneous attributes join
+              the table.</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Open items that could adjust this: practitioner validation of the proxy
+     dimensions (spec §6), the FMP store's own dual materialization (§5), and a shared Postgres
+     catalog for multi-writer DuckLake.</p>
 
   <h2><span class="sect">A</span>Appendix — full schemas</h2>
 
