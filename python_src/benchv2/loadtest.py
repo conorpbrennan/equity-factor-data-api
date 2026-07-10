@@ -13,8 +13,8 @@ from pathlib import Path
 import polars as pl
 import pyarrow as pa
 import pyarrow.ipc
-import requests
 
+from .engines import EngineBalancer
 from .queries import build
 
 MIX = ["TS1", "CS2", "TS5", "CS4"]   # pruned, small-result: the interactive mix
@@ -29,37 +29,33 @@ def main():
     ap.add_argument("--out", default="data/v2loadtest/results.json")
     args = ap.parse_args()
     prm = json.loads(Path(args.params).read_text())
-    urls = [u.rstrip("/") for u in os.environ["ENGINE_URL"].split(",")]
     sqls = {q: build(q, "E_engine", args.root.rstrip("/"), prm["hundred"], prm["ts_asset"])
             for q in MIX}
 
-    def fire(sess, url, q):
+    def fire(bal, q):
         t0 = time.perf_counter()
         rows = 0
         for sql in sqls[q]:
-            r = sess.post(f"{url}/query", json={"sql": sql}, timeout=900)
-            r.raise_for_status()
-            rows += pl.from_arrow(pa.ipc.open_stream(r.content).read_all()).height
+            rows += pl.from_arrow(pa.ipc.open_stream(bal.query(sql)).read_all()).height
         return time.perf_counter() - t0
 
-    # prewarm every engine on every mix query
-    for u in urls:
-        s = requests.Session()
+    # prewarm every engine on every mix query (direct, bypassing rotation)
+    warm_bal = EngineBalancer()
+    for u in list(warm_bal._configured):
         for q in MIX:
-            fire(s, u, q)
-    print(f"prewarmed {len(urls)} engines on {MIX}")
+            for sql in sqls[q]:
+                warm_bal._session(u).post(f"{u}/query", json={"sql": sql}, timeout=900)
+    print(f"prewarmed {len(warm_bal._configured)} engines on {MIX}")
 
     results = {}
     for c in range(1, args.max_c + 1):
         lat, lock = [], threading.Lock()
-        rr = itertools.cycle(urls)
-        assign = [[next(rr) for _ in range(args.per_client)] for _ in range(c)]
 
         def client(ci):
-            sess = requests.Session()
+            bal = EngineBalancer()
             mix = itertools.cycle(MIX)
-            for url in assign[ci]:
-                t = fire(sess, url, next(mix))
+            for _ in range(args.per_client):
+                t = fire(bal, next(mix))
                 with lock:
                     lat.append(t)
 

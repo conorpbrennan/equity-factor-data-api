@@ -72,21 +72,14 @@ def worker(root: str, arm: str, qid: str, mode: str, iters: int, params_file: st
     prm = json.loads(Path(params_file).read_text())
 
     if arm == "E_engine":
-        import itertools
         import pyarrow.ipc
-        import requests
-        # client-side round-robin over the engine fleet (comma-separated URLs)
-        urls = [u.rstrip("/") for u in os.environ["ENGINE_URL"].split(",")]
-        rr = itertools.cycle(urls)
-        sessions = {u: requests.Session() for u in urls}
+        from .engines import EngineBalancer
+        bal = EngineBalancer()
 
         def run_once(_con=None):
             rows = 0
             for sql in build(qid, arm, root, prm["hundred"], prm["ts_asset"]):
-                u = next(rr)
-                r = sessions[u].post(f"{u}/query", json={"sql": sql}, timeout=900)
-                r.raise_for_status()
-                df = pl.from_arrow(pa_read(r.content))
+                df = pl.from_arrow(pa_read(bal.query(sql)))
                 rows += df.height
             return rows
 

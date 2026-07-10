@@ -3,3 +3,4 @@ pyarrow>=17.0   # parquet writing, arrow interchange
 duckdb>=1.0     # transforms, benchmark, ducklake/httpfs client
 polars>=1.0     # benchmark + sample client dataframes
 boto3>=1.34     # sample client catalog download, AWS ops
+requests>=2.31   # engine client + AWS ops
