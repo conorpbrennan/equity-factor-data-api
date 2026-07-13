@@ -54,7 +54,20 @@ class UserCache:
 
     def get(self, dataset: str, start: date, end: date,
             assets: list[int] | None, loader) -> pl.DataFrame:
-        """Serve from the warmed frame when covered, else call loader."""
+        """Serve from the warmed frame when covered, else call loader.
+
+        Args:
+            dataset: Which warmed frame, e.g. ``"factor_loading"``.
+            start: Requested range start (a single date is ``[d, d]``).
+            end: Requested range end.
+            assets: Requested asset scope; None = all assets.
+            loader: Zero-arg callable hitting the store; invoked only on
+                a miss — fall-through is always correct, coverage only
+                decides where the answer came from.
+
+        Returns:
+            The covered slice of the warmed frame, or ``loader()``.
+        """
         if self.covers(dataset, start, end, assets):
             self.hits += 1
             frame = self.frames[dataset]

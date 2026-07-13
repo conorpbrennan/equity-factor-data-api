@@ -18,6 +18,7 @@ One small package, four modules, each one row of the straw-man table:
 |---|---|---|
 | `columns` | column-name case + shared string constants | snake_case; one constant per column name, imported everywhere, never re-typed |
 | `identifiers` | security identifier schema | `sec_id` + `sec_id_type` for single-scheme frames; explicit `sec_id_<scheme>` columns for multi-scheme; typed enum for the scheme values |
+| `columns` (streams) | publication streams | `type = OFFICIAL \| T0_ESTIMATE` as ordinary rows; orthogonal to `version_id` (restatements — an official row can itself be restated); the stream toggle is an equality filter, never a join |
 | `units` | scale and frequency per quantity | returns daily decimal; vol annualized decimal; covariance annualized decimal²; money in millions USD — all conversions executable via `scale_to_canonical()` |
 | `signatures` | function argument naming | `as_of` / `start` / `end` / `assets` / `factors` / `model`; a `DISCOURAGED` map of spellings seen in the wild |
 

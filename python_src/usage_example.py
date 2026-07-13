@@ -156,7 +156,13 @@ def main() -> None:
         untouched (with the convention exposed as metadata); the facade
         converts once at the return boundary using the conventions library,
         so every facade user sees the same canonical units — annualized
-        decimal vol, daily decimal returns — whatever the vendor did.""")
+        decimal vol, daily decimal returns — whatever the vendor did.
+        Factor returns also carry two publication streams — vendor official
+        and same-day T0 estimate — as ordinary rows discriminated by the
+        type column (orthogonal to version_id, which handles restatements):
+        the toggle below is an equality filter on that column, never a
+        join, and a store predating the column still serves official while
+        refusing estimates loudly.""")
 
     raw = core.specific_risk(latest, assets=[1])
     can = fac.get_specific_risk("latest", assets=[1])
@@ -165,8 +171,15 @@ def main() -> None:
     print(f"facade (canonical annualized decimal): {can[VALUE][0]}")
 
     rets = fac.get_factor_returns()          # latest date, daily decimal
-    print("get_factor_returns() head:")
+    print("get_factor_returns() head — official stream (default):")
     print(rets.head(3))
+
+    # Factor returns carry two publication streams — vendor official and
+    # same-day T0 estimates — discriminated by the type column. The toggle
+    # is an equality filter on that column, never a join.
+    est = fac.get_factor_returns(estimates=True)
+    print("get_factor_returns(estimates=True) — T0 estimate stream:")
+    print(est.head(3))
 
     # ------------------------------------------------------------------ 7
     section(7, "the pre-warm cache: load the working set once", """

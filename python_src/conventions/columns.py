@@ -25,6 +25,15 @@ WEIGHT = "weight"
 RETURN = "return"              # daily, decimal fraction (units.CANONICAL)
 SPECIFIC_RISK = "specific_risk"
 
+# Publication stream of a row. Orthogonal to VERSION_ID: TYPE answers
+# "which stream?" (same-day estimate vs vendor official), VERSION_ID answers
+# "as known when?" (restatements). The toggle between streams is an equality
+# filter, never a join.
+TYPE = "type"
+OFFICIAL = "OFFICIAL"          # vendor-published value
+T0_ESTIMATE = "T0_ESTIMATE"    # same-day estimate, pending the official
+PUB_TYPES = (OFFICIAL, T0_ESTIMATE)
+
 
 # ------------------------------------------------------------- adapter toolkit
 def snake_case(name: str) -> str:

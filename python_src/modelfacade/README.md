@@ -24,6 +24,11 @@ explicit conversion between them.
 - assets as internal ints or vendor ids (resolved via `asset_xref`, scheme
   auto-detected or pinned with `sec_id_type=`)
 - outputs in canonical units (`conventions.units`), whatever the vendor stored
+- **T0 publication streams**: factor returns carry `type = OFFICIAL |
+  T0_ESTIMATE` (orthogonal to `version_id`, which handles restatements);
+  `get_factor_returns(estimates=True)` toggles streams via an equality
+  filter — never a join — and bypasses the cache. Stores predating the
+  column serve official and refuse estimate requests loudly.
 - wide one-liners: `ModelFacade.load(mid).get_factor_loadings("latest")`
 - output in the user's dataframe library: `output="polars"` (default here) or
   `output="pandas"` — internals stay polars/Arrow, conversion happens once at

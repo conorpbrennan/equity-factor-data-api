@@ -16,8 +16,9 @@ from typing import Sequence
 
 import polars as pl
 
-from conventions import (ASSET_ID, COB_DATE, FACTOR_ID, SPECIFIC_RISK, VALUE,
-                         SecurityIDType, scale_to_canonical)
+from conventions import (ASSET_ID, COB_DATE, FACTOR_ID, SPECIFIC_RISK,
+                         T0_ESTIMATE, VALUE, SecurityIDType,
+                         scale_to_canonical)
 
 from .cache import Coverage, UserCache
 from .core import Model
@@ -40,7 +41,22 @@ class ModelFacade:
     @classmethod
     def load(cls, model_id: str, root: str | None = None,
              output: str = "polars") -> "ModelFacade":
-        """One line from model name to data access ($FACTOR_STORE_ROOT)."""
+        """One line from model name to data access.
+
+        Args:
+            model_id: Model to open, e.g. ``"AX_WW4_MH"``; validated
+                against the store's model_master.
+            root: Store root (local path or ``s3://``). Defaults to
+                ``$FACTOR_STORE_ROOT``.
+            output: Dataframe library returned to the user — ``"polars"``
+                or ``"pandas"``.
+
+        Returns:
+            A facade over a strict core ``Model``, with an empty cache.
+
+        Raises:
+            ValueError: Unknown model, bad ``output``, or no store root.
+        """
         return cls(Model(Store.open(root), model_id), output=output)
 
     def _out(self, frame: pl.DataFrame):
@@ -123,8 +139,26 @@ class ModelFacade:
     def get_factor_loadings(self, as_of="latest", *, assets=None,
                             sec_id_type=None, factors=None,
                             wide: bool = True):
-        """Loadings for one date; wide (one column per factor, absent = 0.0)
-        or long. Loadings are unitless — no conversion applies."""
+        """Factor loadings for one date. Loadings are unitless.
+
+        Args:
+            as_of: ``date``, ``datetime``, ``'YYYY-MM-DD'``, or
+                ``'latest'`` (the model's last COB in the store).
+            assets: Internal int ids, or vendor id strings resolved via
+                asset_xref. None = all covered assets.
+            sec_id_type: Pin the vendor scheme of ``assets``
+                (``SecurityIDType``); omit to auto-detect.
+            factors: Subset of factor ids; None = all factors.
+            wide: One column per factor in factor_seq order, absent
+                one-hots filled 0.0 (default). False returns sparse long
+                form.
+
+        Returns:
+            Frame in the facade's ``output`` library.
+
+        Raises:
+            ValueError: Unknown security id or factor id.
+        """
         cob = self._as_date(as_of)
         ids = self._resolve_assets(assets, sec_id_type)
         long = self.cache.get(
@@ -146,7 +180,20 @@ class ModelFacade:
 
     def get_specific_risk(self, as_of="latest", *, assets=None,
                           sec_id_type=None):
-        """Annualized decimal vol (canonical), whatever the vendor stored."""
+        """Specific risk in canonical units (annualized decimal vol).
+
+        The vendor's stored convention (e.g. ``ann_vol_pct``) is read from
+        model_master and converted once at the return boundary.
+
+        Args:
+            as_of: Date leniency as in ``get_factor_loadings``.
+            assets: Internal ids or vendor id strings; None = all.
+            sec_id_type: Vendor scheme of ``assets``; omit to auto-detect.
+
+        Returns:
+            Frame with canonical ``value`` column, in the facade's
+            ``output`` library.
+        """
         cob = self._as_date(as_of)
         ids = self._resolve_assets(assets, sec_id_type)
         raw = self.cache.get(
@@ -157,20 +204,49 @@ class ModelFacade:
             self._model.conventions["specific_risk_convention"]))
 
     def get_factor_returns(self, start=None, end=None, *,
-                           factors=None):
-        """Daily decimal returns (canonical). Defaults to the latest date."""
+                           factors=None, estimates: bool = False):
+        """Factor returns in canonical units (daily decimal).
+
+        Args:
+            start: Range start (inclusive); date leniency as elsewhere.
+                None = latest date only.
+            end: Range end (inclusive); None = same as ``start``.
+            factors: Subset of factor ids; None = all.
+            estimates: False (default) = the vendor OFFICIAL stream.
+                True = the T0_ESTIMATE stream — an equality filter on the
+                ``type`` column, never a join. Estimate requests bypass
+                the cache, since their whole value is freshness.
+
+        Returns:
+            Frame with canonical ``value`` column.
+
+        Raises:
+            ValueError: ``estimates=True`` against a store whose
+                factor_return predates the ``type`` column.
+        """
         lo = self._as_date(start, "start") if start else self._as_date("latest")
         hi = self._as_date(end, "end") if end else lo
-        raw = self.cache.get(
-            "factor_return", lo, hi, None,
-            lambda: self._model.factor_returns(lo, hi, factors=factors))
+        if estimates:
+            raw = self._model.factor_returns(lo, hi, factors=factors,
+                                             pub_type=T0_ESTIMATE)
+        else:
+            raw = self.cache.get(
+                "factor_return", lo, hi, None,
+                lambda: self._model.factor_returns(lo, hi, factors=factors))
         if factors is not None:
             raw = raw.filter(pl.col(FACTOR_ID).is_in(list(factors)))
         return self._out(self._scale(
             raw, "return", self._model.conventions["return_convention"]))
 
     def get_covariance(self, as_of="latest"):
-        """Annualized decimal^2 factor covariance (canonical)."""
+        """Factor covariance in canonical units (annualized decimal²).
+
+        Args:
+            as_of: Date leniency as elsewhere.
+
+        Returns:
+            Upper-triangle pairs (factor_id_1, factor_id_2, value).
+        """
         cob = self._as_date(as_of)
         return self._out(self._scale(self._model.covariance(cob), "covariance",
                                      self._model.conventions["cov_scaling"]))
@@ -181,9 +257,21 @@ class ModelFacade:
 
     # ------------------------------------------------------------ pre-warming
     def warm(self, assets, *, as_of="latest", sec_id_type=None) -> dict:
-        """Pre-warm the expected working set: year-to-date loadings and
-        specific risk for `assets`, plus all factor returns — the set that
-        answers most day-to-day questions about a held portfolio."""
+        """Pre-warm the expected working set.
+
+        Loads year-to-date loadings and specific risk for ``assets``, plus
+        all factor returns (official stream) — the set that answers most
+        day-to-day questions about a held portfolio. Subsequent covered
+        requests are served from memory.
+
+        Args:
+            assets: The position list — internal ids or vendor id strings.
+            as_of: Warm up to this COB date; ``'latest'`` by default.
+            sec_id_type: Vendor scheme of ``assets``; omit to auto-detect.
+
+        Returns:
+            Cache stats: ``{'hits', 'misses', 'rows': {dataset: n}}``.
+        """
         cob = self._as_date(as_of)
         ids = self._resolve_assets(assets, sec_id_type)
         start = date(cob.year, 1, 1)
@@ -224,22 +312,48 @@ class ModelFacade:
         return max(ends)
 
     def save_cache(self, path=None) -> Path:
-        """Persist the warmed working set for reuse across sessions, keyed
-        by (as-of date, model_id): <base>/usercache/<as_of>/<model_id>/.
-        Typical pattern: warm(positions) in a morning job, save_cache();
-        later sessions load_cache() and start hot. Same key overwrites
-        (last warm wins). Explicit path= bypasses the keyed layout."""
+        """Persist the warmed working set for reuse across sessions.
+
+        Keyed by (as-of date, model_id):
+        ``<base>/usercache/<as_of>/<model_id>/`` — one parquet per dataset
+        plus a coverage manifest. Typical pattern: ``warm(positions)`` in a
+        morning job, then ``save_cache()``; later sessions ``load_cache()``
+        and start hot. Same key overwrites (last warm wins).
+
+        Args:
+            path: Exact directory, bypassing the keyed layout. Default
+                base is the system temp dir, overridable via
+                ``$FACTOR_CACHE_DIR``.
+
+        Returns:
+            The directory written.
+
+        Raises:
+            ValueError: Nothing warmed yet.
+        """
         target = (Path(path).expanduser() if path is not None else
                   self._cache_base() / self._coverage_end().isoformat()
                   / self.model_id)
         return self.cache.to_disk(target, meta={"model_id": self.model_id})
 
     def load_cache(self, path=None, as_of=None) -> dict:
-        """Adopt a saved working set; refuses one saved for a different
-        model. No arguments: the most recent as-of date that has a set for
-        this model. as_of= pins a specific date; path= an exact directory.
+        """Adopt a working set saved by ``save_cache()``.
+
         Data is frozen as of its key date — re-warm when it's older than
-        the questions you're asking. Returns cache stats."""
+        the questions you're asking.
+
+        Args:
+            path: Exact directory (bypasses key resolution).
+            as_of: Pin a specific key date. With neither argument, the
+                most recent date that has a set for this model wins.
+
+        Returns:
+            Cache stats (counters start at zero for the new session).
+
+        Raises:
+            FileNotFoundError: No saved set for this model.
+            ValueError: The set was saved for a different model.
+        """
         if path is not None:
             target = Path(path).expanduser()
         elif as_of is not None:

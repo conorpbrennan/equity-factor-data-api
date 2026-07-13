@@ -164,13 +164,29 @@ def build_micro_store(root: Path) -> None:
         "version_id": pa.array([1] * len(DATES) * 6, type=pa.int16()),
     }), fact_dir("specific_risk") / "data_00.parquet")
 
-    # -- factor_return: flat 0.5 in daily_pct — canonical must be 0.005.
+    # -- factor_return: two publication streams per factor-day, discriminated
+    #    by the type column — OFFICIAL 0.5 and T0_ESTIMATE 0.6 (daily_pct,
+    #    so canonical 0.005 / 0.006). The stream toggle is an equality
+    #    filter; version_id stays orthogonal (restatements).
+    n_fr = len(DATES) * len(FACTORS) * 2
     pq.write_table(pa.table({
-        "cob_date": [d for d in DATES for _ in FACTORS],
-        "factor_id": list(FACTORS) * len(DATES),
-        "value": [0.5] * len(DATES) * len(FACTORS),           # daily_pct
-        "version_id": pa.array([1] * len(DATES) * len(FACTORS), type=pa.int16()),
+        "cob_date": [d for d in DATES for _ in FACTORS for _t in range(2)],
+        "factor_id": [f for _ in DATES for f in FACTORS for _t in range(2)],
+        "value": [v for _ in DATES for _f in FACTORS for v in (0.5, 0.6)],
+        "type": ["OFFICIAL", "T0_ESTIMATE"] * (len(DATES) * len(FACTORS)),
+        "version_id": pa.array([1] * n_fr, type=pa.int16()),
     }), fact_dir("factor_return") / "data_00.parquet")
+
+    # -- legacy stream: the Barra model's factor_return has NO type column —
+    #    a store from before the estimate stream existed. The core must fall
+    #    back to serving it as official-only and refuse estimate requests.
+    bdir = norm / "factor_return" / "model_id=BARRA_TEST1_L" / "year=2025"
+    bdir.mkdir(parents=True)
+    pq.write_table(pa.table({
+        "cob_date": list(DATES), "factor_id": ["BETA"] * len(DATES),
+        "value": [0.001] * len(DATES),                        # daily_dec
+        "version_id": pa.array([1] * len(DATES), type=pa.int16()),
+    }), bdir / "data_00.parquet")
 
     # -- factor_covariance: upper triangle only (like the real store),
     #    4.0 on the diagonal / 1.0 off, in ann_var_pct2 — diag must
@@ -203,14 +219,20 @@ def build_micro_store(root: Path) -> None:
 DEMO_STORE_DIR = Path(__file__).resolve().parents[2] / "data" / "demo" / "microstore"
 
 
+MICRO_STORE_VERSION = "2"   # bump when build_micro_store's schema changes
+
+
 def ensure_micro_store(path: str | Path | None = None) -> Path:
     """Build the micro store at a persistent location if it isn't already
-    there (default: <repo>/data/demo/microstore). Idempotent; a partial or
-    stale build is cleared and rebuilt."""
+    there (default: <repo>/data/demo/microstore). Idempotent; a partial,
+    stale, or schema-outdated build is cleared and rebuilt."""
     p = Path(path).expanduser() if path else DEMO_STORE_DIR
-    if not (p / "normalized" / "model_master.parquet").exists():
-        shutil.rmtree(p, ignore_errors=True)   # clear partial builds
+    marker = p / ".version"
+    current = marker.read_text() if marker.exists() else None
+    if current != MICRO_STORE_VERSION:
+        shutil.rmtree(p, ignore_errors=True)   # partial or outdated build
         build_micro_store(p)
+        marker.write_text(MICRO_STORE_VERSION)
     return p
 
 
@@ -339,6 +361,42 @@ def check_facade_units(root):
     assert abs(diag["value"][0] - 4e-4) < 1e-15           # 4.0 ann_var_pct2
 
 
+def check_t0_estimates(root):
+    """The T0 publication-stream design: official and estimate rows coexist,
+    discriminated by the type column, and the toggle is an equality filter —
+    never a join. Default requests see only the official stream;
+    estimates=True switches streams and bypasses the cache (freshness is the
+    point); pub_type is validated; and a legacy store without the column
+    still serves official but refuses estimates loudly."""
+    fac = ModelFacade.load(MID, str(root))
+    official = fac.get_factor_returns("2025-01-02", "2025-01-15")
+    assert official.height == len(DATES) * len(FACTORS)       # one stream
+    assert abs(official["value"][0] - 0.005) < 1e-12          # 0.5 daily_pct
+    est = fac.get_factor_returns("2025-01-02", "2025-01-15", estimates=True)
+    assert est.height == len(DATES) * len(FACTORS)
+    assert abs(est["value"][0] - 0.006) < 1e-12               # 0.6 daily_pct
+    try:
+        fac.core.factor_returns(DATES[0], DATES[-1], pub_type="GUESS")
+        raise AssertionError("bad pub_type accepted")
+    except ValueError:
+        pass
+    # estimates bypass the cache: after warm(), official is served from it...
+    fac.warm([1, 2, 3])
+    fac.get_factor_returns("2025-01-02", "2025-01-15")
+    assert fac.cache.stats["hits"] == 1
+    misses_before = fac.cache.stats["misses"]
+    fac.get_factor_returns("2025-01-05", estimates=True)      # ...not this
+    assert fac.cache.stats["misses"] == misses_before
+    # legacy store (no type column): official works, estimates refuse
+    legacy = Model(Store.open(str(root)), "BARRA_TEST1_L")
+    assert legacy.factor_returns(DATES[0], DATES[-1]).height == len(DATES)
+    try:
+        legacy.factor_returns(DATES[0], DATES[-1], pub_type="T0_ESTIMATE")
+        raise AssertionError("estimates served from a store without them")
+    except ValueError as e:
+        assert "no" in str(e) and "type" in str(e)
+
+
 def check_cache_prewarm(root):
     """The pre-warm working-set design: before warm() every request is a
     miss; warm([1,2,3]) loads YTD loadings + specific risk for those assets
@@ -463,6 +521,7 @@ CHECKS = [
     ("facade: string dates + 'latest', wide pivot with 0.0 fill", check_facade_dates_and_wide),
     ("facade: vendor ids via asset_xref (explicit + detected)", check_facade_identifiers),
     ("facade: canonical units (srisk, returns, covariance)", check_facade_units),
+    ("facade: T0 estimate stream via the type column", check_t0_estimates),
     ("facade: pre-warm cache serves covered subsets", check_cache_prewarm),
     ("facade: cache persists to parquet, reloads across sessions", check_cache_persistence),
     ("facade: output='pandas' at the return boundary", check_pandas_output),

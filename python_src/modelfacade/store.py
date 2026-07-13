@@ -58,7 +58,13 @@ class Store:
         return self._con
 
     def sql(self, query: str) -> pl.DataFrame:
-        return pl.from_arrow(self.con.execute(query).arrow())
+        # fetch_arrow_table, not .arrow(): the latter returns a
+        # RecordBatchReader (duckdb >= 1.5) whose zero-batch case polars
+        # refuses ("Must pass schema, or at least one RecordBatch")
+        table = self.con.execute(query).fetch_arrow_table()
+        if table.num_rows == 0:
+            table = table.schema.empty_table()   # empty frame, schema intact
+        return pl.from_arrow(table)
 
     # ------------------------------------------------------------ dimensions
     def dim(self, name: str) -> pl.DataFrame:

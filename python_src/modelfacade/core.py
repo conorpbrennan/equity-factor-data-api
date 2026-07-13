@@ -14,7 +14,8 @@ from typing import Sequence
 import polars as pl
 
 from conventions import (ASSET_ID, COB_DATE, FACTOR_ID, FACTOR_SEQ,
-                         FACTOR_TYPE, MODEL_ID, VERSION_ID)
+                         FACTOR_TYPE, MODEL_ID, OFFICIAL, PUB_TYPES, TYPE,
+                         VERSION_ID)
 
 from .store import Store
 
@@ -43,6 +44,7 @@ class Model:
         self._factors = (store.dim("factor_master")
                          .filter(pl.col(MODEL_ID) == model_id)
                          .sort(FACTOR_SEQ))
+        self._cols: dict[tuple[str, str], bool] = {}   # (fact, col) -> exists
 
     # ------------------------------------------------------------- metadata
     @property
@@ -84,7 +86,22 @@ class Model:
                         assets: Sequence[int] | None = None,
                         factors: Sequence[str] | None = None,
                         version: int = 1) -> pl.DataFrame:
-        """Long-form loadings (sparse: nonzero rows only), raw values."""
+        """Long-form loadings for one date (sparse: nonzero rows only).
+
+        Args:
+            as_of: COB date — ``datetime.date`` only; never coerced.
+            assets: Internal integer asset ids; None = all covered.
+            factors: Factor ids, validated against factor_master.
+            version: Publication version; 1 = original, >1 = restatement.
+
+        Returns:
+            Columns ``cob_date, asset_id, factor_id, value, version_id``;
+            values raw, exactly as the vendor published.
+
+        Raises:
+            TypeError: ``as_of`` is not a ``datetime.date``.
+            ValueError: Unknown factor id.
+        """
         _require_date(as_of, "as_of")
         factors = self._check_factors(factors)
         where = (f"year = {as_of.year} AND {COB_DATE} = DATE '{as_of}' "
@@ -120,14 +137,51 @@ class Model:
             where += self._in(ASSET_ID, list(assets))
         return self._fact("specific_risk", where).drop("year", MODEL_ID)
 
+    def _has_column(self, fact: str, col: str) -> bool:
+        """Schema probe (cached): does this fact table carry the column?"""
+        key = (fact, col)
+        if key not in self._cols:
+            glob = self.store.fact_glob(fact, self.model_id)
+            described = self.store.sql(
+                f"DESCRIBE SELECT * FROM read_parquet('{glob}')")
+            self._cols[key] = col in described["column_name"].to_list()
+        return self._cols[key]
+
     def factor_returns(self, start: date, end: date, *,
                        factors: Sequence[str] | None = None,
-                       version: int = 1) -> pl.DataFrame:
+                       version: int = 1,
+                       pub_type: str = OFFICIAL) -> pl.DataFrame:
+        """Factor returns for one publication stream, raw vendor units.
+
+        Args:
+            start: Range start (inclusive), ``datetime.date`` only.
+            end: Range end (inclusive), ``datetime.date`` only.
+            factors: Factor ids, validated; None = all.
+            version: Publication version; 1 = original, >1 = restatement.
+            pub_type: Which stream — ``OFFICIAL`` or ``T0_ESTIMATE`` — via
+                an equality filter on the ``type`` column; orthogonal to
+                ``version``. A store predating the column serves OFFICIAL
+                (its only stream) and refuses estimates.
+
+        Raises:
+            TypeError: Non-date arguments.
+            ValueError: Unknown ``pub_type``/factor, or estimates
+                requested from a store without the ``type`` column.
+        """
         _require_date(start, "start"), _require_date(end, "end")
+        if pub_type not in PUB_TYPES:
+            raise ValueError(f"pub_type must be one of {PUB_TYPES}, "
+                             f"got {pub_type!r}")
         factors = self._check_factors(factors)
         where = (f"year BETWEEN {start.year} AND {end.year} "
                  f"AND {COB_DATE} BETWEEN DATE '{start}' AND DATE '{end}' "
                  f"AND {VERSION_ID} = {version} ")
+        if self._has_column("factor_return", TYPE):
+            where += f"AND {TYPE} = '{pub_type}' "
+        elif pub_type != OFFICIAL:
+            raise ValueError(
+                f"{self.model_id}: factor_return has no {TYPE!r} column — "
+                "this store carries no estimate stream")
         if factors is not None:
             where += self._in(FACTOR_ID, factors)
         return (self._fact("factor_return", where)

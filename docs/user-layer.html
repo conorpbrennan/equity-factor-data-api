@@ -159,11 +159,15 @@ sec_id_col(SecurityIDType.BARRA)   # 'sec_id_barra' (multi-scheme frames)</pre>
     <tbody>
       <tr><td class="mono">MODEL_ID · COB_DATE · ASSET_ID · SEC_ID · SEC_ID_TYPE ·
               FACTOR_ID · FACTOR_SEQ · FACTOR_NAME · FACTOR_TYPE · VALUE ·
-              VERSION_ID · WEIGHT · RETURN · SPECIFIC_RISK</td>
+              VERSION_ID · TYPE · OFFICIAL · T0_ESTIMATE · WEIGHT · RETURN ·
+              SPECIFIC_RISK</td>
           <td>constants</td>
           <td class="wrap">Canonical column names. <code>VERSION_ID</code>: 1 = original
-              publication, &gt;1 = restatement. <code>RETURN</code> is daily decimal by the
-              units convention.</td></tr>
+              publication, &gt;1 = restatement. <code>TYPE</code> is the publication
+              stream (<code>OFFICIAL</code> | <code>T0_ESTIMATE</code>) — orthogonal to
+              <code>VERSION_ID</code>: type answers "which stream?", version answers "as
+              known when?". <code>RETURN</code> is daily decimal by the units
+              convention.</td></tr>
       <tr><td class="mono">snake_case(name) -&gt; str</td><td>function</td>
           <td class="wrap">Any naming style to snake_case.</td></tr>
       <tr><td class="mono">rename_snake(df) -&gt; df</td><td>function</td>
@@ -267,6 +271,39 @@ fac.core                     # strict layer back</pre>
     </tbody>
   </table></div>
 
+  <h3>Publication streams, side by side</h3>
+  <p>
+    Factor returns carry two publication streams in the same table — the vendor official
+    and the same-day T0 estimate — as ordinary rows discriminated by the <code>type</code>
+    column. <code>type</code> answers <em>"which stream?"</em>; <code>version_id</code>
+    answers <em>"as known when?"</em> (restatements). Keeping them orthogonal means an
+    official row can itself be restated (<code>type=OFFICIAL, version_id=2</code>), and
+    the stream toggle is an equality filter — never a join:
+  </p>
+  <pre>fac.get_factor_returns()                  # official stream (the default)
+# cob_date     factor_id   value   type         version_id
+# 2025-01-15   IND01       0.005   OFFICIAL     1
+
+fac.get_factor_returns(estimates=True)    # same one-liner, estimate stream
+# 2025-01-15   IND01       0.006   T0_ESTIMATE  1
+#   — bypasses the cache: an estimate's whole value is freshness</pre>
+  <p>Existing stores predate the column; nothing about them breaks and no backfill is
+     required before adopting this:</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th class="l">request</th><th class="l">on a store without the type column</th></tr></thead>
+    <tbody>
+      <tr><td>official (the default)</td>
+          <td class="wrap">Works unchanged — a legacy store's rows <em>are</em> the
+              official stream, so serving them unfiltered is correct, not degraded.</td></tr>
+      <tr><td><code>estimates=True</code></td>
+          <td class="wrap">Refuses loudly ("factor_return has no <code>type</code> column —
+              this store carries no estimate stream") — never silently returns official
+              numbers to a caller who asked for estimates.</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">The selftest's micro store deliberately contains one of each: a model
+     whose factor_return carries both streams, and a legacy one without the column.</p>
+
   <h2><span class="sect">6</span>The pre-warm cache</h2>
   <p>
     Not query-result caching: the premise is that most of a user's questions hit a
@@ -357,8 +394,13 @@ fac.load_cache()                     # newest saved set for this model;
           <td>DataFrame</td><td class="wrap">Wide by default; loadings are unitless.</td></tr>
       <tr><td class="mono nw">.get_specific_risk(as_of='latest', *, assets, sec_id_type)</td>
           <td>DataFrame</td><td class="wrap">Annualized decimal vol.</td></tr>
-      <tr><td class="mono nw">.get_factor_returns(start=None, end=None, *, factors)</td>
-          <td>DataFrame</td><td class="wrap">Daily decimal; defaults to latest date.</td></tr>
+      <tr><td class="mono nw">.get_factor_returns(start=None, end=None, *, factors,
+              estimates=False)</td>
+          <td>DataFrame</td><td class="wrap">Daily decimal; defaults to latest date.
+              <code>estimates=True</code> switches to the T0 estimate stream — an equality
+              filter on the type column, never a join — and bypasses the cache (its value
+              is freshness). Stores predating the column serve official and refuse
+              estimates loudly.</td></tr>
       <tr><td class="mono nw">.get_covariance(as_of='latest')</td>
           <td>DataFrame</td><td class="wrap">Annualized decimal².</td></tr>
       <tr><td class="mono nw">.get_fmp_weights(as_of='latest', *, factors)</td>
@@ -388,11 +430,12 @@ fac.load_cache()                     # newest saved set for this model;
   <p>
     <code>python -m modelfacade selftest</code> fabricates a complete micro store in a temp
     dir (genv2 layout, deterministic values) and asserts every contract on this page —
-    11 checks, one PASS line each, covering both packages: the conventions toolkit and unit
+    12 checks, one PASS line each, covering both packages: the conventions toolkit and unit
     multipliers, core strictness, sparse reads, date and identifier leniency, exact unit
-    conversions (29.0 ann_vol_pct → 0.29), wide-pivot fill, cache hit/miss accounting,
-    cache persistence across sessions, pandas at the return boundary, and the wrap/unwrap
-    round trip.
+    conversions (29.0 ann_vol_pct → 0.29), the T0 estimate stream (both publication
+    streams, cache bypass, legacy-store fallback), wide-pivot fill, cache hit/miss
+    accounting, cache persistence across sessions, pandas at the return boundary, and the
+    wrap/unwrap round trip.
     <code>python -m modelfacade demo --root DIR</code> runs the one-liner story against a
     real v2 store.
   </p>
@@ -433,7 +476,7 @@ fac.load_cache()                     # newest saved set for this model;
   <footer>
     <p>Source: <span class="mono">python_src/conventions/</span> ·
        <span class="mono">python_src/modelfacade/</span> ·
-       <span class="mono">python -m modelfacade selftest</span> — 11/11 ·
+       <span class="mono">python -m modelfacade selftest</span> — 12/12 ·
        companion: <a href="v2-report.html">v2 factor store report</a></p>
   </footer>
 </main>

@@ -15,8 +15,9 @@ Canonical choices (each is a straw man pending ratification — see README.md):
 
 from .columns import (
     ASSET_ID, COB_DATE, FACTOR_ID, FACTOR_NAME, FACTOR_SEQ, FACTOR_TYPE,
-    MODEL_ID, RETURN, SEC_ID, SEC_ID_TYPE, SPECIFIC_RISK, VALUE, VERSION_ID,
-    WEIGHT, rename_snake, snake_case,
+    MODEL_ID, OFFICIAL, PUB_TYPES, RETURN, SEC_ID, SEC_ID_TYPE,
+    SPECIFIC_RISK, T0_ESTIMATE, TYPE, VALUE, VERSION_ID, WEIGHT,
+    rename_snake, snake_case,
 )
 from .identifiers import SecurityIDType, sec_id_col
 from .units import CANONICAL, TRADING_DAYS, scale_to_canonical
@@ -24,8 +25,9 @@ from .signatures import CANONICAL_PARAMS
 
 __all__ = [
     "ASSET_ID", "COB_DATE", "FACTOR_ID", "FACTOR_NAME", "FACTOR_SEQ",
-    "FACTOR_TYPE", "MODEL_ID", "RETURN", "SEC_ID", "SEC_ID_TYPE",
-    "SPECIFIC_RISK", "VALUE", "VERSION_ID", "WEIGHT",
+    "FACTOR_TYPE", "MODEL_ID", "OFFICIAL", "PUB_TYPES", "RETURN", "SEC_ID",
+    "SEC_ID_TYPE", "SPECIFIC_RISK", "T0_ESTIMATE", "TYPE", "VALUE",
+    "VERSION_ID", "WEIGHT",
     "rename_snake", "snake_case",
     "SecurityIDType", "sec_id_col",
     "CANONICAL", "TRADING_DAYS", "scale_to_canonical",
