@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>conventions &amp; modelfacade — the user-layer packages</title>
+<style>
+  /* Tufte & Few, single light theme: paper ground, dark ink, one blue accent.
+     Same design language as v2-report.html. */
+  :root {
+    --surface: #fffffe; --panel: #f6f6f4; --ink: #1c2126; --ink-2: #43494f;
+    --ink-3: #7d838a; --hairline: #e6e7e9; --rule: #b9bcbf; --accent: #3b6ea5;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--surface); color: var(--ink); margin: 0;
+         padding: 3.5rem 1.5rem 4rem;
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; }
+  .mono, code { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+                font-size: .92em; }
+  .eyebrow { font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+             color: var(--ink-3); margin: 0 0 .6rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  h1 { font-size: 1.55rem; font-weight: 650; margin: 0 0 .45rem; text-wrap: balance; }
+  h2 { font-size: 1.08rem; font-weight: 650; margin: 3.2rem 0 .3rem; }
+  h2 .sect { color: var(--ink-3); font-weight: 500; margin-right: .5rem; }
+  h3 { font-size: .9rem; font-weight: 650; margin: 1.6rem 0 .3rem; }
+  .part { margin-top: 4rem; padding-top: .6rem; border-top: 2px solid var(--rule);
+          font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+          color: var(--ink-3); }
+  .part + h2 { margin-top: .4rem; }
+  p, li { color: var(--ink-2); }
+  p { max-width: 74ch; }
+  ul { max-width: 74ch; padding-left: 1.2rem; }
+  strong { color: var(--ink); font-weight: 600; }
+  .key { color: var(--accent); font-weight: 600; }
+
+  .tablewrap { overflow-x: auto; margin: 1rem 0 .4rem; }
+  table { border-collapse: collapse; font-size: .8rem; }
+  th, td { text-align: left; padding: .38rem 1.2rem .38rem 0; vertical-align: top; }
+  thead th { color: var(--ink-3); font-weight: 500; font-size: .7rem; letter-spacing: .06em;
+             text-transform: uppercase; border-bottom: 1px solid var(--hairline);
+             white-space: nowrap; }
+  td { color: var(--ink-2); border-bottom: 1px solid var(--hairline); }
+  td:first-child { color: var(--ink); }
+  td.wrap { min-width: 20rem; white-space: normal; }
+  td.nw { white-space: nowrap; }
+
+  pre { font: .76rem/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: var(--ink-2); margin: .8rem 0; padding: .8rem 1rem;
+        background: var(--panel); border-left: 2px solid var(--rule);
+        border-radius: 2px; overflow-x: auto; }
+  .note { font-size: .76rem; color: var(--ink-3); max-width: 78ch; margin: .3rem 0 0; }
+  .callout { border-left: 3px solid var(--accent); padding: .1rem 0 .1rem 1rem;
+             margin: 1.4rem 0; max-width: 74ch; }
+  .callout p { margin: .4rem 0; font-size: .85rem; }
+  .callout .h { font-weight: 650; color: var(--ink); }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 3rem; }
+  footer { margin-top: 3.2rem; padding-top: .8rem; border-top: 1px solid var(--hairline);
+           font-size: .78rem; color: var(--ink-3); max-width: 78ch; }
+</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Equity factor data API · package documentation ·
+     <a href="v2-report.html">v2 report</a></p>
+  <h1><span class="mono">conventions</span> &amp; <span class="mono">modelfacade</span> —
+      the user-layer packages</h1>
+  <p>
+    Two packages, one dependency arrow. <span class="mono">conventions</span> makes the
+    firm-wide data conventions importable — shared column constants, executable unit
+    conversions, typed identifier schemes, canonical argument names — so a convention is
+    something code references rather than a document code drifts from.
+    <span class="mono">modelfacade</span> is its first consumer: a strict core
+    <code>Model</code> and a lenient user-facing <code>ModelFacade</code> over the factor
+    store, importing every literal, scale, and scheme from
+    <span class="mono">conventions</span>. Together they scaffold the first two roadmap
+    projects and demonstrate the intended pattern for everything after.
+  </p>
+
+  <!-- ============================================================ conventions -->
+  <p class="part">Part I · conventions</p>
+  <h2><span class="sect">1</span>Why a library, not a document</h2>
+  <p>
+    Inconsistent conventions create friction at every seam: time lost renaming columns,
+    converting units, and remembering which spelling of <code>as_of</code> this particular
+    library wanted — and each inconsistency is a place for subtle bugs to hide. Documents
+    that state the conventions exist and disagree with each other. The fix is a library
+    that <em>is</em> the conventions: new code imports them, and legacy data is sanitized
+    by the adapter toolkit at the point where it enters the system.
+    <span class="key">Target-plus-adapter, not forced migration.</span>
+  </p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>module</th><th>decision</th><th>straw man</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">columns</td><td>column-name case + shared constants</td>
+          <td class="wrap">snake_case; one string constant per column name, imported
+              everywhere, never re-typed. Toolkit: <code>snake_case()</code>,
+              <code>rename_snake()</code>.</td></tr>
+      <tr><td class="mono">identifiers</td><td>security identifier schema</td>
+          <td class="wrap"><code>sec_id</code> + <code>sec_id_type</code> for single-scheme
+              frames; explicit <code>sec_id_&lt;scheme&gt;</code> columns (via
+              <code>sec_id_col()</code>) for multi-scheme; a closed enum for scheme values.</td></tr>
+      <tr><td class="mono">units</td><td>scale and frequency per quantity</td>
+          <td class="wrap">returns daily decimal; volatility annualized decimal; covariance
+              annualized decimal²; money in millions USD. All conversions executable via
+              <code>scale_to_canonical()</code>.</td></tr>
+      <tr><td class="mono">signatures</td><td>function argument naming</td>
+          <td class="wrap"><code>as_of</code> / <code>start</code> / <code>end</code> /
+              <code>assets</code> / <code>factors</code> / <code>model</code>; plus a
+              <code>DISCOURAGED</code> map of spellings seen in the wild.</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">The consistency has more value than any particular choice: every decision
+     here is a straw man, and swapping one is a one-line change every importer picks up.</p>
+
+  <h2><span class="sect">2</span>Usage</h2>
+  <h3>Column constants — reference, never re-type</h3>
+  <pre>from conventions import COB_DATE, ASSET_ID, FACTOR_ID, VALUE
+
+df.filter(pl.col(COB_DATE) == as_of)        # not pl.col("cob_date")</pre>
+
+  <h3>Adapter toolkit — sanitize legacy data at the boundary</h3>
+  <pre>from conventions import snake_case, rename_snake
+
+snake_case("CobDate")      # 'cob_date'   (PascalCase)
+snake_case("COB-DATE")     # 'cob_date'   (upper + hyphen)
+snake_case("ASOFDATE")     # 'asofdate'   (all-caps run stays one word)
+
+df = rename_snake(df)      # every column -> snake_case (polars or pandas)</pre>
+
+  <h3>Units — conversions are multipliers, applied once at the boundary</h3>
+  <pre>from conventions import scale_to_canonical
+
+scale_to_canonical("specific_risk", "ann_vol_pct")   # 0.01
+scale_to_canonical("covariance", "daily_var")        # 252.0
+scale_to_canonical("return", "weekly_bps")           # ValueError, loudly
+
+df.with_columns(pl.col(VALUE) * scale_to_canonical(kind, vendor_convention))</pre>
+
+  <h3>Identifiers — typed schemes, no string drift</h3>
+  <pre>from conventions import SecurityIDType, sec_id_col
+
+SecurityIDType.AXIOMA          # 'AXIOMA' — matches asset_xref.vendor
+sec_id_col(SecurityIDType.BARRA)   # 'sec_id_barra' (multi-scheme frames)</pre>
+
+  <div class="callout">
+    <p class="h">Identifier mapping rules (stated once, enforced in review)</p>
+    <p>Vendor↔vendor mapping is many-to-many — one Barra id can map to several Axioma ids
+       and vice versa. Mapping tables must be dated. Vendor→vendor is never chained
+       silently: always via the internal <code>asset_id</code>.</p>
+  </div>
+
+  <h2><span class="sect">3</span>API reference — conventions</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>name</th><th>kind</th><th>what it does</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">MODEL_ID · COB_DATE · ASSET_ID · SEC_ID · SEC_ID_TYPE ·
+              FACTOR_ID · FACTOR_SEQ · FACTOR_NAME · FACTOR_TYPE · VALUE ·
+              VERSION_ID · WEIGHT · RETURN · SPECIFIC_RISK</td>
+          <td>constants</td>
+          <td class="wrap">Canonical column names. <code>VERSION_ID</code>: 1 = original
+              publication, &gt;1 = restatement. <code>RETURN</code> is daily decimal by the
+              units convention.</td></tr>
+      <tr><td class="mono">snake_case(name) -&gt; str</td><td>function</td>
+          <td class="wrap">Any naming style to snake_case.</td></tr>
+      <tr><td class="mono">rename_snake(df) -&gt; df</td><td>function</td>
+          <td class="wrap">Every column renamed to snake_case; polars and pandas.</td></tr>
+      <tr><td class="mono">SecurityIDType</td><td>str enum</td>
+          <td class="wrap">INTERNAL · BARRA · AXIOMA · TICKER. Values match
+              <code>asset_xref.vendor</code>.</td></tr>
+      <tr><td class="mono">sec_id_col(id_type) -&gt; str</td><td>function</td>
+          <td class="wrap">Explicit column name for one scheme in a multi-scheme frame.</td></tr>
+      <tr><td class="mono">CANONICAL</td><td>dict</td>
+          <td class="wrap">The single statement of canonical units per quantity kind.</td></tr>
+      <tr><td class="mono">TRADING_DAYS</td><td>constant</td>
+          <td class="wrap">252 — the daily↔annualized bridge (<code>sqrt(252)</code> for vol).</td></tr>
+      <tr><td class="mono">scale_to_canonical(kind, convention) -&gt; float</td><td>function</td>
+          <td class="wrap">Multiplier into canonical units. Known conventions per kind:
+              return: daily_dec, daily_pct · specific_risk: ann_vol_dec, ann_vol_pct,
+              daily_vol · covariance: ann_var_dec2, ann_var_pct2, daily_var.
+              Unknown convention → ValueError.</td></tr>
+      <tr><td class="mono">CANONICAL_PARAMS</td><td>dict</td>
+          <td class="wrap">The canonical argument names with one-line definitions.</td></tr>
+      <tr><td class="mono">signatures.DISCOURAGED</td><td>dict</td>
+          <td class="wrap">Spelling → canonical replacement (<code>asof</code>,
+              <code>business_date</code>, <code>date_from</code>, …). Import from
+              <code>conventions.signatures</code>.</td></tr>
+    </tbody>
+  </table></div>
+
+  <!-- ============================================================ modelfacade -->
+  <p class="part">Part II · modelfacade</p>
+  <h2><span class="sect">4</span>Strict core, lenient user layer</h2>
+  <p>
+    Core model libraries are (rightly) strict: exact date types, native identifiers,
+    validated inputs, always-right-or-fails. End users need the opposite: string dates,
+    whatever identifier scheme their positions carry, one-liners, discoverability, and
+    caching they control. Serving both from one class satisfies neither.
+    <span class="key">The resolution is two layers with two contracts and explicit
+    conversion between them</span> — and because they are separate objects, user-cache
+    leniency can never leak into a core computation.
+  </p>
+  <div class="cols">
+    <div>
+      <h3>Model (core.py) — strict</h3>
+      <pre>from datetime import date
+from modelfacade import Model, Store
+
+m = Model(Store.open(root), "AX_WW4_MH")
+m.factor_loadings(date(2025, 6, 30),
+                  assets=[101, 102])
+m.factor_loadings("2025-06-30")
+# TypeError: core does not coerce</pre>
+      <p class="note"><code>datetime.date</code> only (datetimes rejected too — a COB has no
+         time) · internal int asset ids only · factor ids validated against factor_master ·
+         values raw, exactly as the vendor published; conventions exposed as metadata via
+         <code>m.conventions</code>.</p>
+    </div>
+    <div>
+      <h3>ModelFacade (facade.py) — lenient</h3>
+      <pre>from modelfacade import ModelFacade
+
+fac = ModelFacade.load("AX_WW4_MH")
+fac.get_factor_loadings("latest")
+fac.get_specific_risk("2025-06-30",
+    assets=["AX01234567"])   # vendor ids ok
+fac.core                     # strict layer back</pre>
+      <p class="note">String dates + <code>'latest'</code> · vendor ids resolved via
+         asset_xref · canonical units on the way out · wide one-liners · pre-warmable
+         user cache · <code>output="pandas"</code> if that's what your notebook speaks.</p>
+    </div>
+  </div>
+  <p class="note">Store root comes from <code>$FACTOR_STORE_ROOT</code> or
+     <code>load(..., root=...)</code>; local paths and s3:// both work.</p>
+
+  <h2><span class="sect">5</span>What the facade adds, feature by feature</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>leniency</th><th>accepts</th><th>mechanism</th></tr></thead>
+    <tbody>
+      <tr><td>dates</td><td class="nw"><code>date</code> · <code>datetime</code> ·
+              <code>'YYYY-MM-DD'</code> · <code>'latest'</code></td>
+          <td class="wrap"><code>'latest'</code> resolves to the model's last COB date in
+              the store.</td></tr>
+      <tr><td>identifiers</td><td class="nw">internal ints · vendor id strings</td>
+          <td class="wrap">Vendor ids resolve through asset_xref; the scheme is pinned with
+              <code>sec_id_type=SecurityIDType.AXIOMA</code> or auto-detected when
+              unambiguous. Unknown ids raise, never return an empty frame.</td></tr>
+      <tr><td>units</td><td class="nw">—</td>
+          <td class="wrap">Outputs converted to canonical units (Part I §2) using this
+              model's model_master conventions: specific risk → annualized decimal,
+              returns → daily decimal, covariance → annualized decimal². The core keeps
+              raw.</td></tr>
+      <tr><td>shape</td><td class="nw"><code>wide=True</code> (default)</td>
+          <td class="wrap">Sparse long rows pivot to one column per factor in factor_seq
+              order, absent one-hots filled 0.0; <code>wide=False</code> for long form.</td></tr>
+      <tr><td>output library</td><td class="nw"><code>'polars'</code> · <code>'pandas'</code></td>
+          <td class="wrap">Per-facade setting; internals stay polars/Arrow and conversion
+              happens once at the return boundary. Requesting pandas without it installed
+              raises a pointed install hint.</td></tr>
+      <tr><td>discoverability</td><td class="nw">—</td>
+          <td class="wrap"><code>list_models()</code>, <code>.factors</code>,
+              <code>.styles</code>, <code>.describe()</code> (vendor, region, date range,
+              raw unit conventions, base model for variants).</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2><span class="sect">6</span>The pre-warm cache</h2>
+  <p>
+    Not query-result caching: the premise is that most of a user's questions hit a
+    predictable working set — year-to-date data for the assets they hold, in the model
+    they care about. <code>warm()</code> loads that set once; any request <em>covered</em>
+    by it (subset dates, subset assets) is served from memory, and anything outside falls
+    through to the store and still returns correct data.
+  </p>
+  <pre>fac = ModelFacade.load("AX_WW4_MH")
+fac.warm(position_asset_ids)                    # YTD loadings + specific risk
+                                                # for holdings, all factor returns
+fac.get_factor_loadings("2025-06-15", assets=held)   # served from cache
+fac.get_specific_risk("latest", assets=held)         # served from cache
+fac.cache.stats                                 # {'hits': …, 'misses': …, 'rows': …}
+
+fac.save_cache()                     # persist: parquet + manifest, keyed by
+                                     # (as-of date, model) under
+                                     # &lt;temp&gt;/usercache/&lt;as_of&gt;/&lt;model_id&gt;/
+# --- a later session, same machine ---
+fac = ModelFacade.load("AX_WW4_MH")
+fac.load_cache()                     # newest saved set for this model;
+                                     # as_of= pins a date; refuses another
+                                     # model's set</pre>
+  <div class="callout">
+    <p class="h">Design intent</p>
+    <p>Pre-warm the expected set in the morning, before anyone asks — most of a risk
+       manager's day then runs from memory, and the trade-off between freshness and speed
+       stays in the user's hands rather than in a TTL nobody chose. Persistence extends
+       the same idea across sessions: one scheduled job warms and saves, every later
+       session loads and starts hot. The saved set is frozen as of the save — re-warming
+       is the caller's decision, not a TTL's. Once the backing store is fast enough the
+       cache becomes unnecessary without any API change.
+       The scheduled job exists: <span class="mono">warm_cache.py</span> reads a positions
+       file, warms any number of models (one failing doesn't stop the rest), persists each
+       set, and exits nonzero on any failure — cron-ready; try it with
+       <span class="mono">python warm_cache.py --demo</span>.</p>
+  </div>
+
+  <h2><span class="sect">7</span>API reference — modelfacade</h2>
+  <h3>Store &amp; discovery</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>call</th><th>returns</th><th>notes</th></tr></thead>
+    <tbody>
+      <tr><td class="mono nw">Store.open(root=None)</td><td>Store</td>
+          <td class="wrap">root or <code>$FACTOR_STORE_ROOT</code>; local or s3://
+              (env AWS creds).</td></tr>
+      <tr><td class="mono nw">list_models(root=None)</td><td>DataFrame</td>
+          <td class="wrap">model_master: every model with vendor, region, size, unit
+              conventions, base_model_id.</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Model — strict core (all dates <code>datetime.date</code>, all values raw)</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>call</th><th>returns</th><th>notes</th></tr></thead>
+    <tbody>
+      <tr><td class="mono nw">Model(store, model_id)</td><td>Model</td>
+          <td class="wrap">ValueError on unknown model.</td></tr>
+      <tr><td class="mono nw">.factors · .factor_types · .conventions · .meta</td><td>—</td>
+          <td class="wrap">Dimension-backed metadata; factors in factor_seq order.</td></tr>
+      <tr><td class="mono nw">.factor_loadings(as_of, *, assets, factors, version=1)</td>
+          <td>DataFrame</td><td class="wrap">Long form, sparse (nonzero rows only).</td></tr>
+      <tr><td class="mono nw">.loading_history(start, end, *, assets, factors, version=1)</td>
+          <td>DataFrame</td><td class="wrap">Time series for an asset list.</td></tr>
+      <tr><td class="mono nw">.specific_risk(as_of, *, assets, version=1)</td>
+          <td>DataFrame</td><td class="wrap">Raw vendor units.</td></tr>
+      <tr><td class="mono nw">.factor_returns(start, end, *, factors, version=1)</td>
+          <td>DataFrame</td><td class="wrap">Raw vendor units.</td></tr>
+      <tr><td class="mono nw">.covariance(as_of, *, version=1)</td>
+          <td>DataFrame</td><td class="wrap">Upper triangle, raw scaling.</td></tr>
+      <tr><td class="mono nw">.fmp_weights(as_of, *, factors, version=1)</td>
+          <td>DataFrame</td><td class="wrap">Factor-mimicking portfolio weights.</td></tr>
+      <tr><td class="mono nw">.dates()</td><td>(date, date)</td>
+          <td class="wrap">First and last COB in the store for this model.</td></tr>
+    </tbody>
+  </table></div>
+  <h3>ModelFacade — lenient user layer (canonical units out)</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>call</th><th>returns</th><th>notes</th></tr></thead>
+    <tbody>
+      <tr><td class="mono nw">ModelFacade.load(model_id, root=None, output='polars')</td>
+          <td>ModelFacade</td><td class="wrap">One line to data access.</td></tr>
+      <tr><td class="mono nw">ModelFacade(model, cache=None, output='polars')</td>
+          <td>ModelFacade</td><td class="wrap">Wrap an existing core Model.</td></tr>
+      <tr><td class="mono nw">.core</td><td>Model</td>
+          <td class="wrap">Unwrap for core computations.</td></tr>
+      <tr><td class="mono nw">.get_factor_loadings(as_of='latest', *, assets, sec_id_type,
+              factors, wide=True)</td>
+          <td>DataFrame</td><td class="wrap">Wide by default; loadings are unitless.</td></tr>
+      <tr><td class="mono nw">.get_specific_risk(as_of='latest', *, assets, sec_id_type)</td>
+          <td>DataFrame</td><td class="wrap">Annualized decimal vol.</td></tr>
+      <tr><td class="mono nw">.get_factor_returns(start=None, end=None, *, factors)</td>
+          <td>DataFrame</td><td class="wrap">Daily decimal; defaults to latest date.</td></tr>
+      <tr><td class="mono nw">.get_covariance(as_of='latest')</td>
+          <td>DataFrame</td><td class="wrap">Annualized decimal².</td></tr>
+      <tr><td class="mono nw">.get_fmp_weights(as_of='latest', *, factors)</td>
+          <td>DataFrame</td><td class="wrap">As stored (unit gross by construction).</td></tr>
+      <tr><td class="mono nw">.warm(assets, *, as_of='latest', sec_id_type)</td>
+          <td>dict</td><td class="wrap">Pre-warm YTD working set; returns cache stats.</td></tr>
+      <tr><td class="mono nw">.save_cache(path=None)</td>
+          <td>Path</td><td class="wrap">Persist the working set: one parquet per dataset +
+              manifest.json, keyed by (as-of date, model_id) under
+              <code>&lt;temp&gt;/usercache/&lt;as_of&gt;/&lt;model_id&gt;/</code>
+              (base overridable via <code>$FACTOR_CACHE_DIR</code>). The date is the
+              coverage end of the warm — what the data is, not when it was saved. Same
+              key overwrites; asset scope is manifest metadata, not part of the key.</td></tr>
+      <tr><td class="mono nw">.load_cache(path=None, as_of=None)</td>
+          <td>dict</td><td class="wrap">Adopt a saved working set. No args: newest as-of
+              date for this model; <code>as_of=</code> pins a date; <code>path=</code> an
+              exact directory. ValueError if saved for a different model. Counters start
+              at zero.</td></tr>
+      <tr><td class="mono nw">.describe() · .factors · .styles · .model_id · .cache</td>
+          <td>—</td><td class="wrap">Discoverability + cache stats.</td></tr>
+    </tbody>
+  </table></div>
+
+  <!-- ============================================================ shared -->
+  <p class="part">Part III · verification &amp; open questions</p>
+  <h2><span class="sect">8</span>Verification</h2>
+  <p>
+    <code>python -m modelfacade selftest</code> fabricates a complete micro store in a temp
+    dir (genv2 layout, deterministic values) and asserts every contract on this page —
+    11 checks, one PASS line each, covering both packages: the conventions toolkit and unit
+    multipliers, core strictness, sparse reads, date and identifier leniency, exact unit
+    conversions (29.0 ann_vol_pct → 0.29), wide-pivot fill, cache hit/miss accounting,
+    cache persistence across sessions, pandas at the return boundary, and the wrap/unwrap
+    round trip.
+    <code>python -m modelfacade demo --root DIR</code> runs the one-liner story against a
+    real v2 store.
+  </p>
+
+  <h2><span class="sect">9</span>Open questions</h2>
+  <h3>conventions</h3>
+  <ul>
+    <li><strong>Who ratifies?</strong> These need a single owner with the standing to make
+        them stick; a library can enforce spellings, not adoption.</li>
+    <li><strong>Closed enum or free string for <code>sec_id_type</code>?</strong> Closed here
+        (drift-proof), but that makes adding a scheme a code change.</li>
+  </ul>
+  <h3>modelfacade</h3>
+  <ul>
+    <li><strong>Which dataframe library does the user layer speak?</strong> The installed
+        base of risk notebooks is pandas-native, which argues for <code>output="pandas"</code>
+        as the deployed default; this repo defaults to polars to match its own stack. The
+        mechanism makes the default the only real decision.</li>
+    <li><strong>Ownership.</strong> Facade and core must stay in sync, which argues for the
+        core library's owners; the alternative is the team owning application-to-portfolio
+        use. Code location next to the core either way.</li>
+    <li><strong>Units at which layer.</strong> Core-raw / facade-canonical (as built) means
+        two callers can hold different numbers for the same quantity; core-canonical would
+        push vendor conventions down into ingest.</li>
+    <li><strong>Cache staleness under restatement.</strong> Sharper now that working sets
+        persist across sessions (a loaded set may be days old). Pre-warming sidesteps TTLs, but
+        a warmed frame can go stale within a day when a restatement publishes — is
+        re-warm-on-publication enough?</li>
+    <li><strong>Point-in-time.</strong> <code>version</code> is plumbed through the core;
+        the facade doesn't yet expose <code>as_known_on=</code> overlay queries (the store
+        supports it — see the <a href="v2-report.html">v2 report</a>, PIT section).</li>
+    <li><strong>Fast path.</strong> The facade currently reads the normalized store and
+        pivots — correct anywhere, slow at global scale; wiring the generic-slot tables
+        (<code>Store.generic_cs_glob</code>) into <code>get_factor_loadings</code> is the
+        natural next increment.</li>
+  </ul>
+
+  <footer>
+    <p>Source: <span class="mono">python_src/conventions/</span> ·
+       <span class="mono">python_src/modelfacade/</span> ·
+       <span class="mono">python -m modelfacade selftest</span> — 11/11 ·
+       companion: <a href="v2-report.html">v2 factor store report</a></p>
+  </footer>
+</main>
+</body>
+</html>
