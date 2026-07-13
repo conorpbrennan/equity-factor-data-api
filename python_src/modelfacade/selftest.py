@@ -66,6 +66,13 @@ def loading_value(asset: int, seq: int, day: int) -> float:
     return round(0.1 * asset + 0.01 * seq + 0.001 * day, 6)
 
 
+def asset_return_value(asset: int) -> float:
+    """Deterministic per-asset daily return (daily_pct). Varies by asset,
+    but the equal-weight (1/6) FMP average over assets 1..6 is exactly 0.6
+    — matching the stored T0_ESTIMATE factor return."""
+    return round(0.6 + 0.01 * (asset - 3.5), 6)
+
+
 def build_micro_store(root: Path) -> None:
     """Fabricate the store: 4 dimension tables + 5 fact tables for MID.
 
@@ -177,6 +184,17 @@ def build_micro_store(root: Path) -> None:
         "version_id": pa.array([1] * n_fr, type=pa.int16()),
     }), fact_dir("factor_return") / "data_00.parquet")
 
+    # -- asset_return: per-asset total returns (daily_pct), varying by asset
+    #    but constructed so the FMP-weighted average recovers the stored
+    #    T0 estimate exactly: mean over assets 1..6 of 0.6 + 0.01·(a-3.5)
+    #    is 0.6 — the top of the T0 estimation pipeline, checkable.
+    pq.write_table(pa.table({
+        "cob_date": [d for d in DATES for _ in ASSETS],
+        "asset_id": pa.array(ASSETS * len(DATES), type=pa.int32()),
+        "value": [asset_return_value(a) for _ in DATES for a in ASSETS],
+        "version_id": pa.array([1] * len(DATES) * 6, type=pa.int16()),
+    }), fact_dir("asset_return") / "data_00.parquet")
+
     # -- legacy stream: the Barra model's factor_return has NO type column —
     #    a store from before the estimate stream existed. The core must fall
     #    back to serving it as official-only and refuse estimate requests.
@@ -219,7 +237,7 @@ def build_micro_store(root: Path) -> None:
 DEMO_STORE_DIR = Path(__file__).resolve().parents[2] / "data" / "demo" / "microstore"
 
 
-MICRO_STORE_VERSION = "2"   # bump when build_micro_store's schema changes
+MICRO_STORE_VERSION = "3"   # bump when build_micro_store's schema changes
 
 
 def ensure_micro_store(path: str | Path | None = None) -> Path:

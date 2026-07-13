@@ -241,6 +241,36 @@ def main() -> None:
     print("ModelFacade(fac.core).model_id ->", rewrapped.model_id)
     print("fac.core is the strict layer   ->", type(fac.core).__name__)
 
+    # ------------------------------------------------------------------ 10
+    section(10, "analytics: canonical Portfolio, exposures, flash PnL", """
+        One Portfolio class for every portfolio-shaped thing — booked
+        positions, a benchmark, a hypothetical — with arithmetic aligned
+        on asset_id: positions minus benchmark is the active book, fed to
+        exactly the same analytics. The analytics themselves are stateless
+        functions (model, portfolio) -> DataFrame: exposures are
+        value-weighted loadings in $mm, PnL decomposition multiplies each
+        date's exposures by that date's factor returns — and with
+        estimates=True the same decomposition runs on the T0 stream: the
+        flash PnL, available the evening it describes.""")
+
+    from analytics import Portfolio, exposures, pnl_decomposition
+
+    book = Portfolio.from_holdings("book", latest, {1: 10.0, 2: 20.0})
+    bench = Portfolio.from_holdings("bench", latest, {1: 15.0, 2: 15.0})
+    active = book - bench                    # the active portfolio
+    print(book, "\n", bench, "\n", active, sep="")
+
+    print("\nexposures(model, active) — $mm per unit loading:")
+    print(exposures(core, active))
+
+    print("PnL decomposition, official vs flash (same day, one keyword):")
+    official = pnl_decomposition(core, book, start=latest)
+    flash = pnl_decomposition(core, book, start=latest, estimates=True)
+    comparison = (official.select("factor_id", pl.col("pnl").alias("official_pnl"))
+                  .join(flash.select("factor_id", pl.col("pnl").alias("flash_pnl")),
+                        on="factor_id"))
+    print(comparison)
+
     print("\ndone.")
 
 

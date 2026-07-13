@@ -47,3 +47,6 @@ imports the constants; anything legacy is handled by the mini toolkit
 - Do canonical units belong to the core layer or the user layer? (See
   modelfacade/README.md — this scaffold puts conversion at the user layer and
   keeps core raw; the reverse is defensible.)
+- Model/factor identifier taxonomy (how model_ids and custom-variant names
+  are composed) is deliberately absent here — it depends on the Model
+  Transformer project's specs and should be added once those land.

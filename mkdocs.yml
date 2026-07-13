@@ -42,3 +42,4 @@ nav:
   - API reference:
       - conventions: api/conventions.md
       - modelfacade: api/modelfacade.md
+      - analytics: api/analytics.md

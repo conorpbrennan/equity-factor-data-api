@@ -1,4 +1,4 @@
-"""Strict core Model: the FMA-shaped layer.
+"""Strict core Model: the systems-facing layer.
 
 Contract: datetime.date only, internal integer asset ids only, factor ids
 validated against factor_master, values returned exactly as the store holds
@@ -125,6 +125,22 @@ class Model:
         if factors is not None:
             where += self._in(FACTOR_ID, factors)
         return (self._fact("factor_loading", where)
+                .drop("year", MODEL_ID).sort(ASSET_ID, COB_DATE))
+
+    def asset_returns(self, start: date, end: date, *,
+                      assets: Sequence[int] | None = None,
+                      version: int = 1) -> pl.DataFrame:
+        """Per-asset total returns, raw vendor units (same convention as
+        factor returns per model_master). The input to T0 estimation:
+        FMP weights × asset returns. Raises like every core read; a store
+        without the asset_return dataset simply has no rows to serve."""
+        _require_date(start, "start"), _require_date(end, "end")
+        where = (f"year BETWEEN {start.year} AND {end.year} "
+                 f"AND {COB_DATE} BETWEEN DATE '{start}' AND DATE '{end}' "
+                 f"AND {VERSION_ID} = {version} ")
+        if assets is not None:
+            where += self._in(ASSET_ID, [int(a) for a in assets])
+        return (self._fact("asset_return", where)
                 .drop("year", MODEL_ID).sort(ASSET_ID, COB_DATE))
 
     def specific_risk(self, as_of: date, *,

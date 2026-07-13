@@ -18,13 +18,22 @@ core `Model` (dates only, internal ids, raw vendor units, fail-fast) and a
 lenient user-facing `ModelFacade` (string dates, vendor ids, canonical units,
 wide one-liners, pre-warmable persistent cache, T0 estimate stream).
 
+**[analytics](api/analytics.md)** — the canonical `Portfolio` class (booked /
+benchmark / hypothetical, with arithmetic: positions − benchmark = active)
+and the two fundamental analytics as stateless functions: `exposures` and
+`pnl_decomposition` — the latter doubling as the flash PnL via
+`estimates=True`.
+
 ## Quick start
 
 ```bash
 cd python_src
 python -m modelfacade selftest        # 12 contract checks, no data needed
+python -m analytics selftest          # 6 exact-number analytics checks
 python warm_cache.py --demo           # the morning job, persistent demo
 python usage_example.py               # narrated tour, consumes the above
+python examples/explain_change.py     # one script per risk question —
+                                      # see examples/README.md for all five
 ```
 
 ```python
@@ -34,3 +43,9 @@ fac = ModelFacade.load("AX_WW4_MH")               # $FACTOR_STORE_ROOT
 df = fac.get_factor_loadings("latest")            # wide, one line
 est = fac.get_factor_returns(estimates=True)      # T0 estimate stream
 ```
+
+A Claude Code skill ships with the repo
+(`.claude/skills/factor-data/SKILL.md`): inside this repo, Claude answers
+"give me today's factor exposures for my portfolio" or "explain where this
+exposure change came from" by writing and running snippets against these
+packages.

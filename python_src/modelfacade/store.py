@@ -17,7 +17,7 @@ from conventions import MODEL_ID
 
 _DIMS = ("model_master", "factor_master", "asset_master", "asset_xref")
 
-_FACTS = ("factor_loading", "factor_covariance", "specific_risk",
+_FACTS = ("asset_return", "factor_loading", "factor_covariance", "specific_risk",
           "universe_membership", "factor_return", "fmp")
 
 
