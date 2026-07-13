@@ -1,0 +1,104 @@
+"""User-layer cache: pre-warm an expected working set, serve subsets from it.
+
+The design premise (not query-result caching): most of a user's questions hit
+a predictable working set — e.g. year-to-date data for the assets they hold in
+the model they care about. warm() loads that set once; get() serves any
+subset request from it and falls through to the loader for anything outside.
+Lives strictly at the facade layer so leniency never leaks into core.
+
+The working set can be persisted (to_disk/from_disk): one parquet file per
+dataset plus a manifest.json carrying the coverage declarations, so a set
+warmed once — by an earlier session, or a scheduled morning job — is reusable
+across sessions. Persistence freezes the data as of the save; the caller
+decides when a saved set is too old and re-warms.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+
+import polars as pl
+
+from conventions import ASSET_ID, COB_DATE
+
+
+@dataclass
+class Coverage:
+    start: date
+    end: date
+    assets: frozenset[int] | None    # None = all assets
+
+
+@dataclass
+class UserCache:
+    frames: dict[str, pl.DataFrame] = field(default_factory=dict)
+    coverage: dict[str, Coverage] = field(default_factory=dict)
+    hits: int = 0
+    misses: int = 0
+
+    def put(self, dataset: str, frame: pl.DataFrame, cov: Coverage) -> None:
+        self.frames[dataset] = frame
+        self.coverage[dataset] = cov
+
+    def covers(self, dataset: str, start: date, end: date,
+               assets: list[int] | None) -> bool:
+        cov = self.coverage.get(dataset)
+        if cov is None or not (cov.start <= start and end <= cov.end):
+            return False
+        if cov.assets is None:
+            return True
+        return assets is not None and set(assets) <= cov.assets
+
+    def get(self, dataset: str, start: date, end: date,
+            assets: list[int] | None, loader) -> pl.DataFrame:
+        """Serve from the warmed frame when covered, else call loader."""
+        if self.covers(dataset, start, end, assets):
+            self.hits += 1
+            frame = self.frames[dataset]
+            expr = pl.col(COB_DATE).is_between(start, end)
+            if assets is not None and ASSET_ID in frame.columns:
+                expr &= pl.col(ASSET_ID).is_in(assets)
+            return frame.filter(expr)
+        self.misses += 1
+        return loader()
+
+    @property
+    def stats(self) -> dict:
+        rows = {k: len(v) for k, v in self.frames.items()}
+        return {"hits": self.hits, "misses": self.misses, "rows": rows}
+
+    # ------------------------------------------------------------ persistence
+    def to_disk(self, path: str | Path, meta: dict | None = None) -> Path:
+        """Write the working set under `path`: one parquet per dataset plus
+        manifest.json (coverage + caller-supplied meta, e.g. model_id)."""
+        path = Path(path).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        manifest: dict = {"meta": meta or {}, "datasets": {}}
+        for name, frame in self.frames.items():
+            frame.write_parquet(path / f"{name}.parquet")
+            cov = self.coverage[name]
+            manifest["datasets"][name] = {
+                "start": cov.start.isoformat(), "end": cov.end.isoformat(),
+                "assets": sorted(cov.assets) if cov.assets is not None else None,
+                "rows": len(frame),
+            }
+        (path / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        return path
+
+    @classmethod
+    def from_disk(cls, path: str | Path) -> tuple["UserCache", dict]:
+        """Rebuild a cache from to_disk() output; returns (cache, meta).
+        Counters start at zero — stats describe the new session."""
+        path = Path(path).expanduser()
+        manifest = json.loads((path / "manifest.json").read_text())
+        cache = cls()
+        for name, d in manifest["datasets"].items():
+            frame = pl.read_parquet(path / f"{name}.parquet")
+            assets = frozenset(d["assets"]) if d["assets"] is not None else None
+            cache.put(name, frame,
+                      Coverage(date.fromisoformat(d["start"]),
+                               date.fromisoformat(d["end"]), assets))
+        return cache, manifest["meta"]
