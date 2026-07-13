@@ -1,0 +1,44 @@
+site_name: Equity Factor Data API
+site_description: conventions & modelfacade — the user-layer packages
+repo_url: https://github.com/conorpbrennan/equity-factor-data-api
+docs_dir: docs_src
+site_dir: site
+
+theme:
+  name: material
+  palette:                     # single light scheme (house rule: light only)
+    scheme: default
+    primary: blue grey
+    accent: blue
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - toc.follow
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python_src]
+          options:
+            docstring_style: google
+            members_order: source
+            show_root_heading: true
+            show_source: true
+            separate_signature: true
+            show_signature_annotations: true
+            merge_init_into_class: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - tables
+
+nav:
+  - Overview: index.md
+  - API reference:
+      - conventions: api/conventions.md
+      - modelfacade: api/modelfacade.md
