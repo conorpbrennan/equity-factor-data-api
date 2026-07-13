@@ -14,14 +14,17 @@ to see the full producer/consumer pipeline.
 from __future__ import annotations
 
 import argparse
+import textwrap
 from datetime import date
 from pathlib import Path
 
 import polars as pl
 
 
-def section(n: int, title: str) -> None:
+def section(n: int, title: str, desc: str) -> None:
+    """Header plus a wrapped explanation, so the output narrates itself."""
     print(f"\n{'=' * 72}\n{n}. {title}\n{'=' * 72}")
+    print(textwrap.fill(" ".join(desc.split()), width=72), end="\n\n")
 
 
 def main() -> None:
@@ -31,7 +34,13 @@ def main() -> None:
     args = ap.parse_args()
 
     # ------------------------------------------------------------------ 1
-    section(1, "conventions: constants, adapter toolkit, units")
+    section(1, "conventions: constants, adapter toolkit, units", """
+        A convention is only real if code can import it. Column names are
+        shared string constants (reference the constant, never re-type the
+        literal); legacy naming is sanitized at the boundary by the adapter
+        toolkit; unit conventions are executable conversions — every one a
+        multiplier into canonical units; identifier schemes are a typed enum
+        so 'barra' vs 'Barra' vs 'BARRA_ID' cannot drift.""")
 
     # Canonical column names are shared string constants — code references
     # the constant, never re-types the literal.
@@ -70,7 +79,13 @@ def main() -> None:
         root, model_id = str(ensure_micro_store()), MID
 
     # ------------------------------------------------------------------ 2
-    section(2, "discoverability: list_models() and describe()")
+    section(2, "discoverability: list_models() and describe()", """
+        A new user should not need tribal knowledge to orient. list_models()
+        reads the store's model_master — every model with its vendor, region,
+        size, and raw unit conventions. describe() answers the first
+        questions about one model: which factors are styles, what date range
+        is loaded, what units the vendor publishes in, whether it is a
+        custom variant of a base model.""")
 
     from modelfacade import ModelFacade, list_models
     print(list_models(root))
@@ -80,7 +95,13 @@ def main() -> None:
         print(f"  {k}: {v}")
 
     # ------------------------------------------------------------------ 3
-    section(3, "the strict core: always right or fails fast")
+    section(3, "the strict core: always right or fails fast", """
+        Model is the layer core systems build on: datetime.date only (a COB
+        has no time — even datetimes are rejected), internal integer asset
+        ids only, factor ids validated against the master, values exactly as
+        the vendor published them. It never coerces — a wrong input is a
+        loud TypeError pointing you at the facade, not a silent guess.
+        Loadings come back long-form and sparse: only the nonzero rows.""")
 
     core = fac.core                          # unwrap the strict layer
     latest = core.dates()[1]                 # datetime.date, as core demands
@@ -95,7 +116,13 @@ def main() -> None:
         print(f"core.factor_loadings('{latest}') -> TypeError: {e}")
 
     # ------------------------------------------------------------------ 4
-    section(4, "the lenient facade: string dates, 'latest', wide one-liners")
+    section(4, "the lenient facade: string dates, 'latest', wide one-liners", """
+        ModelFacade wraps a core Model and accepts what humans actually
+        type: ISO strings, 'latest', datetimes. Output is wide by default —
+        the sparse long rows pivot to one column per factor in factor_seq
+        order, absent one-hots filled with 0.0 — which is the shape an
+        analysis notebook wants. Same data as the core, one line instead of
+        boilerplate.""")
 
     wide = fac.get_factor_loadings("latest")             # wide: 1 col/factor
     print("get_factor_loadings('latest') ->", wide.shape, "columns:",
@@ -107,7 +134,12 @@ def main() -> None:
           same.equals(fac.get_factor_loadings(latest)))
 
     # ------------------------------------------------------------------ 5
-    section(5, "vendor security ids resolve via asset_xref")
+    section(5, "vendor security ids resolve via asset_xref", """
+        Positions rarely arrive keyed by internal ids. The facade accepts
+        vendor identifiers and resolves them through the asset_xref mapping
+        table — pin the scheme with sec_id_type=, or let it auto-detect when
+        the ids are unambiguous. An unknown id raises immediately; it never
+        silently drops out of the result.""")
 
     picked = fac.get_factor_loadings(
         "latest", assets=["AX0000003"], sec_id_type=SecurityIDType.AXIOMA)
@@ -118,7 +150,13 @@ def main() -> None:
           auto[ASSET_ID].to_list())
 
     # ------------------------------------------------------------------ 6
-    section(6, "canonical units out of the facade; raw out of the core")
+    section(6, "canonical units out of the facade; raw out of the core", """
+        Each vendor publishes in its own units; this model stores specific
+        risk as annualized percent. The core hands the raw number back
+        untouched (with the convention exposed as metadata); the facade
+        converts once at the return boundary using the conventions library,
+        so every facade user sees the same canonical units — annualized
+        decimal vol, daily decimal returns — whatever the vendor did.""")
 
     raw = core.specific_risk(latest, assets=[1])
     can = fac.get_specific_risk("latest", assets=[1])
@@ -131,7 +169,14 @@ def main() -> None:
     print(rets.head(3))
 
     # ------------------------------------------------------------------ 7
-    section(7, "the pre-warm cache: load the working set once")
+    section(7, "the pre-warm cache: load the working set once", """
+        Not query-result caching: most questions hit a predictable working
+        set — YTD data for the assets you hold, in the model you care about.
+        warm() loads that set once; any request covered by it (subset dates,
+        subset assets) is served from memory, anything outside falls through
+        to the store and is still correct. Working sets persist to parquet
+        keyed by (as-of date, model): the scheduled job (warm_cache.py) is
+        the producer, and the fresh session below consumes what it saved.""")
 
     session = ModelFacade.load(model_id, root)   # a fresh user session
     positions = [1, 2, 3]                        # 'the assets you hold'
@@ -156,7 +201,12 @@ def main() -> None:
               "— run `python warm_cache.py --demo` first to see this step hit")
 
     # ------------------------------------------------------------------ 8
-    section(8, "output='pandas' — conversion once, at the return boundary")
+    section(8, "output='pandas' — conversion once, at the return boundary", """
+        The dataframe library the user layer speaks is a per-facade setting,
+        not an architecture decision: internals stay polars/Arrow throughout
+        (core, cache, store reads), and the conversion to pandas happens
+        exactly once, as the frame is handed back. Requesting pandas without
+        it installed fails with an install hint, not a stack trace.""")
 
     try:
         pdfac = ModelFacade.load(model_id, root, output="pandas")
@@ -167,7 +217,12 @@ def main() -> None:
         print(f"(pandas not installed: {e})")
 
     # ------------------------------------------------------------------ 9
-    section(9, "the layers convert both ways")
+    section(9, "the layers convert both ways", """
+        The two layers are separate objects with an explicit bridge:
+        facade.core unwraps the strict Model for handing into core
+        computations; ModelFacade(model) wraps one back up for interactive
+        use. Because the user cache lives only on the facade, its leniency
+        can never leak into a core computation.""")
 
     rewrapped = ModelFacade(fac.core)        # wrap a core Model
     print("ModelFacade(fac.core).model_id ->", rewrapped.model_id)
