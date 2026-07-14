@@ -5,7 +5,8 @@ self-contained (bootstraps its own imports, builds the demo micro store on
 first run). Run from anywhere:
 
     python examples/exposures_today.py            # demo store
-    python examples/exposures_today.py --root DIR # a real v2 store
+    python examples/exposures_today.py --aws       # the project S3 store
+    python examples/exposures_today.py --root DIR # any other v2 store
 
 | script | the question it answers |
 |---|---|

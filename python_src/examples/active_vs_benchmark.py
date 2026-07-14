@@ -5,7 +5,7 @@ active book goes through exactly the same analytics as its parents. Common
 factor bets shared with the benchmark net toward zero; what remains is the
 deliberate tilt.
 
-    python examples/active_vs_benchmark.py [--root DIR] [--model ID]
+    python examples/active_vs_benchmark.py [--aws | --root DIR] [--model ID]
 """
 
 from _bootstrap import setup

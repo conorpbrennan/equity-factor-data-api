@@ -75,7 +75,11 @@ def warm_one(model_id: str, root: str | None, positions: list,
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Warm and persist per-model user caches for a position list.")
-    ap.add_argument("--root", help="store root (default: $FACTOR_STORE_ROOT)")
+    grp = ap.add_mutually_exclusive_group()
+    grp.add_argument("--aws", action="store_true",
+                     help="the project S3 store (needs AWS_FACTOR_READER_* keys in env)")
+    grp.add_argument("--root",
+                     help="store root (default: $FACTOR_STORE_ROOT)")
     ap.add_argument("--model", action="append", default=[],
                     help="model id to warm; repeat for several")
     ap.add_argument("--positions", help="file of asset ids, one per line")
@@ -87,6 +91,9 @@ def main() -> int:
     ap.add_argument("--demo", action="store_true",
                     help="run against a fabricated micro store")
     args = ap.parse_args()
+    if args.aws:
+        from modelfacade.store import AWS_ROOT
+        args.root = AWS_ROOT
 
     if args.demo:
         # Persistent demo: micro store under the repo's data/demo/, working

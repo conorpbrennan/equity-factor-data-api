@@ -4,7 +4,7 @@ The drill-down: factor-level changes first, then attribute the biggest
 mover to the assets behind it, and say the answer in a sentence. This is
 the "drilling into risk changes for a day" exercise, as one function call.
 
-    python examples/explain_change.py [--root DIR] [--model ID]
+    python examples/explain_change.py [--aws | --root DIR] [--model ID]
 """
 
 from _bootstrap import setup

@@ -222,8 +222,22 @@ class Model:
         return self._fact("fmp", where).drop("year", MODEL_ID)
 
     def dates(self) -> tuple[date, date]:
-        """First and last COB date this model has data for."""
+        """First and last COB date this model has data for.
+
+        Pruned to the first and last year hive partitions: the years come
+        from the file listing alone (no parquet footers), so a remote store
+        answers from two partition scans instead of a full-glob footer
+        sweep — the difference between ~1s and ~50s over the internet.
+        """
         glob = self.store.fact_glob("specific_risk", self.model_id)
-        row = self.store.sql(f"SELECT min({COB_DATE}) lo, max({COB_DATE}) hi "
-                             f"FROM read_parquet('{glob}')").to_dicts()[0]
+        listing = self.store.sql(f"SELECT file FROM glob('{glob}')")
+        years = (listing["file"].str.extract(r"year=(\d+)", 1)
+                 .cast(pl.Int32).drop_nulls())
+        if years.is_empty():
+            raise ValueError(f"{self.model_id}: no dated specific_risk "
+                             f"files under {glob}")
+        row = self.store.sql(
+            f"SELECT min({COB_DATE}) lo, max({COB_DATE}) hi "
+            f"FROM read_parquet('{glob}', hive_partitioning=true) "
+            f"WHERE year IN ({years.min()}, {years.max()})").to_dicts()[0]
         return row["lo"], row["hi"]

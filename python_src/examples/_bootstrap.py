@@ -17,9 +17,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # python_src
 
 def setup(description: str) -> tuple[str, str]:
     ap = argparse.ArgumentParser(description=description)
-    ap.add_argument("--root", help="v2 store root (default: demo micro store)")
+    grp = ap.add_mutually_exclusive_group()
+    grp.add_argument("--aws", action="store_true",
+                     help="the project S3 store (needs AWS_FACTOR_READER_* keys in env)")
+    grp.add_argument("--root", help="explicit v2 store root "
+                                    "(default: demo micro store)")
     ap.add_argument("--model", default=None, help="model id")
     args = ap.parse_args()
+    if args.aws:
+        from modelfacade.store import AWS_ROOT
+        return AWS_ROOT, args.model or "AX_WW4_MH"
     if args.root:
         return args.root, args.model or "AX_WW4_MH"
     from modelfacade.selftest import MID, ensure_micro_store

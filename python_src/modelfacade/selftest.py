@@ -483,6 +483,33 @@ def check_cache_persistence(root):
         del os.environ["FACTOR_CACHE_DIR"]
 
 
+def check_from_cache_offline(root):
+    """The cold-start-without-a-store contract: save_cache() persists the
+    dimension tables next to the facts, and from_cache() rebuilds a working
+    facade from disk alone — no store connection is opened for dims, vendor
+    id resolution, 'latest' (frozen to the set's as-of date), or any covered
+    request. Only a request outside coverage may fall through."""
+    os.environ["FACTOR_CACHE_DIR"] = str(Path(root) / "offlinebase")
+    try:
+        a = ModelFacade.load(MID, str(root))
+        a.warm([1, 2, 3])
+        saved = a.save_cache()
+        for dim in ("model_master", "factor_master", "asset_xref"):
+            assert (saved / "dims" / f"{dim}.parquet").exists(), dim
+
+        b = ModelFacade.from_cache(MID, str(root))      # fresh 'session'
+        store = b.core.store
+        assert store._con is None                        # never connected
+        b.get_factor_loadings("latest", assets=[1, 2])
+        b.get_specific_risk("latest", assets=["AX0000001"])   # xref offline
+        b.get_factor_returns(DATES[0], DATES[-1])
+        assert b.cache.stats["hits"] == 3 and b.cache.stats["misses"] == 0
+        assert store._con is None, "covered session touched the store"
+        assert b._frozen_latest == DATES[-1]             # 'latest' is frozen
+    finally:
+        del os.environ["FACTOR_CACHE_DIR"]
+
+
 def check_pandas_output(root):
     """The output= option: invalid values rejected at construction; with
     output='pandas' the conversion happens once at the return boundary —
@@ -542,6 +569,7 @@ CHECKS = [
     ("facade: T0 estimate stream via the type column", check_t0_estimates),
     ("facade: pre-warm cache serves covered subsets", check_cache_prewarm),
     ("facade: cache persists to parquet, reloads across sessions", check_cache_persistence),
+    ("facade: from_cache cold-starts offline, zero store contact", check_from_cache_offline),
     ("facade: output='pandas' at the return boundary", check_pandas_output),
     ("layers: wrap/unwrap round trip, describe()", check_layers_interop),
 ]

@@ -15,7 +15,9 @@ ENGINE_THREADS / ENGINE_MEM.
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
+import time
 
 import duckdb
 import pyarrow as pa
@@ -28,6 +30,25 @@ from pydantic import BaseModel
 app = FastAPI()
 _served = 0
 _lock = threading.Lock()
+_last_activity = time.monotonic()
+
+# Idle shutdown: once queries stop arriving for ENGINE_IDLE_TTL seconds the
+# watchdog powers the instance off — clients relaunch through the jump
+# service on their next cold session. /health pings do NOT count as
+# activity, so monitoring can't keep an idle box alive. 0 disables.
+IDLE_TTL = int(os.environ.get("ENGINE_IDLE_TTL", 900))
+
+
+def _idle_watchdog() -> None:
+    while True:
+        time.sleep(30)
+        if IDLE_TTL and time.monotonic() - _last_activity > IDLE_TTL:
+            subprocess.run(["sudo", "shutdown", "-h", "now"])
+            return
+
+
+if IDLE_TTL:
+    threading.Thread(target=_idle_watchdog, daemon=True).start()
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
@@ -59,13 +80,15 @@ class Query(BaseModel):
 
 @app.post("/query")
 def query(q: Query) -> Response:
-    global _served
+    global _served, _last_activity
+    _last_activity = time.monotonic()
     try:
         # concurrent cursors on one database instance: shared buffer pool and
         # range cache, true parallel execution (GIL released inside duckdb)
         table = CON.cursor().execute(q.sql).fetch_arrow_table()
         with _lock:
             _served += 1
+        _last_activity = time.monotonic()   # long queries count to their end
     except Exception as e:               # surface engine errors to the client
         raise HTTPException(status_code=400, detail=str(e)[:2000])
     sink = pa.BufferOutputStream()
@@ -78,7 +101,9 @@ def query(q: Query) -> Response:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "queries_served": _served}
+    return {"status": "ok", "queries_served": _served,
+            "idle_seconds": round(time.monotonic() - _last_activity),
+            "idle_ttl": IDLE_TTL}
 
 
 if __name__ == "__main__":

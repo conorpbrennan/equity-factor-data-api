@@ -6,7 +6,7 @@ serve the day's questions from memory; if it hasn't, warm one now and
 persist it for the next session. Either way the queries afterwards are
 identical — the cache only changes where answers come from.
 
-    python examples/morning_workflow.py [--root DIR] [--model ID]
+    python examples/morning_workflow.py [--aws | --root DIR] [--model ID]
 """
 
 from _bootstrap import setup

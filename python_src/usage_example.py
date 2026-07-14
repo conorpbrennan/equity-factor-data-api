@@ -29,9 +29,15 @@ def section(n: int, title: str, desc: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", help="real v2 store root (default: micro store)")
+    grp = ap.add_mutually_exclusive_group()
+    grp.add_argument("--aws", action="store_true",
+                     help="the project S3 store (needs AWS_FACTOR_READER_* keys in env)")
+    grp.add_argument("--root", help="real v2 store root (default: micro store)")
     ap.add_argument("--model", default="AX_WW4_MH", help="model id with --root")
     args = ap.parse_args()
+    if args.aws:
+        from modelfacade.store import AWS_ROOT
+        args.root = AWS_ROOT
 
     # ------------------------------------------------------------------ 1
     section(1, "conventions: constants, adapter toolkit, units", """
@@ -141,12 +147,20 @@ def main() -> None:
         the ids are unambiguous. An unknown id raises immediately; it never
         silently drops out of the result.""")
 
+    # demo ids looked up from assets actually covered at the latest date,
+    # so the tour holds on any store, not just the micro fixture
+    xref = fac.core.store.dim("asset_xref")
+    a1, a2 = wide[ASSET_ID][0], wide[ASSET_ID][1]
+    ax_id, b_id = [
+        xref.filter((pl.col("vendor") == vendor)
+                    & (pl.col(ASSET_ID) == a))["vendor_asset_id"][0]
+        for vendor, a in (("AXIOMA", a1), ("BARRA", a2))]
     picked = fac.get_factor_loadings(
-        "latest", assets=["AX0000003"], sec_id_type=SecurityIDType.AXIOMA)
-    print("assets=['AX0000003'] (AXIOMA) -> asset_id",
+        "latest", assets=[ax_id], sec_id_type=SecurityIDType.AXIOMA)
+    print(f"assets=[{ax_id!r}] (AXIOMA) -> asset_id",
           picked[ASSET_ID].to_list())
-    auto = fac.get_factor_loadings("latest", assets=["B0000004"])
-    print("assets=['B0000004'] (scheme auto-detected) -> asset_id",
+    auto = fac.get_factor_loadings("latest", assets=[b_id])
+    print(f"assets=[{b_id!r}] (scheme auto-detected) -> asset_id",
           auto[ASSET_ID].to_list())
 
     # ------------------------------------------------------------------ 6
@@ -177,9 +191,12 @@ def main() -> None:
     # Factor returns carry two publication streams — vendor official and
     # same-day T0 estimates — discriminated by the type column. The toggle
     # is an equality filter on that column, never a join.
-    est = fac.get_factor_returns(estimates=True)
-    print("get_factor_returns(estimates=True) — T0 estimate stream:")
-    print(est.head(3))
+    try:
+        est = fac.get_factor_returns(estimates=True)
+        print("get_factor_returns(estimates=True) — T0 estimate stream:")
+        print(est.head(3))
+    except ValueError as e:
+        print(f"get_factor_returns(estimates=True) -> refused: {e}")
 
     # ------------------------------------------------------------------ 7
     section(7, "the pre-warm cache: load the working set once", """
@@ -265,11 +282,15 @@ def main() -> None:
 
     print("PnL decomposition, official vs flash (same day, one keyword):")
     official = pnl_decomposition(core, book, start=latest)
-    flash = pnl_decomposition(core, book, start=latest, estimates=True)
-    comparison = (official.select("factor_id", pl.col("pnl").alias("official_pnl"))
-                  .join(flash.select("factor_id", pl.col("pnl").alias("flash_pnl")),
-                        on="factor_id"))
-    print(comparison)
+    try:
+        flash = pnl_decomposition(core, book, start=latest, estimates=True)
+        comparison = (official.select("factor_id", pl.col("pnl").alias("official_pnl"))
+                      .join(flash.select("factor_id", pl.col("pnl").alias("flash_pnl")),
+                            on="factor_id"))
+        print(comparison)
+    except ValueError as e:
+        print(f"flash -> refused: {e}")
+        print(official)
 
     print("\ndone.")
 

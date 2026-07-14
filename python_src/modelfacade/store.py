@@ -2,7 +2,8 @@
 
 Layout is the genv2 store (generator-spec-v2.md): dimension parquet at the
 root, hive-partitioned facts underneath, optional transforms_b fast path.
-Local paths and s3:// both work (env AWS creds, region eu-west-1 default).
+Local paths and s3:// both work (AWS_FACTOR_READER_* env keys, region
+eu-west-1 default).
 """
 
 from __future__ import annotations
@@ -14,6 +15,10 @@ import duckdb
 import polars as pl
 
 from conventions import MODEL_ID
+
+# the project's S3 store — what every CLI's --aws flag resolves to, defined
+# once so the bucket name never gets re-typed
+AWS_ROOT = "s3://equity-factor-data-651406457779/v2"
 
 _DIMS = ("model_master", "factor_master", "asset_master", "asset_xref")
 
@@ -28,6 +33,8 @@ class Store:
     memory_limit: str = os.environ.get("DUCK_MEM", "4GB")
     _con: duckdb.DuckDBPyConnection | None = field(default=None, repr=False)
     _dims: dict[str, pl.DataFrame] = field(default_factory=dict, repr=False)
+    _engine: str | None = field(default=None, repr=False)
+    _compute_checked: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         self.root = self.root.rstrip("/")
@@ -40,31 +47,115 @@ class Store:
         return cls(root=root)
 
     # ------------------------------------------------------------ connection
+    def _ensure_compute(self) -> None:
+        """Ensure the in-region query engine is up before first S3 data access.
+
+        Active only when the store is s3:// AND the jump service is
+        configured (JUMP_SERVICE_URL + JUMP_SERVICE_TOKEN in the
+        environment) — local stores and unconfigured environments skip it
+        entirely. Blocking: ~1 min if the box has to launch, <1s when it
+        is already alive. Fails loudly if the service is configured but
+        cannot deliver a box — a half-provisioned session would only fail
+        later and less clearly. On success, queries route to the engine
+        on the box (sql() below) instead of scanning S3 locally.
+        """
+        if self._compute_checked:
+            return
+        if not self.root.startswith("s3://"):
+            return
+        if not (os.environ.get("JUMP_SERVICE_URL")
+                and os.environ.get("JUMP_SERVICE_TOKEN")):
+            return
+        from querybox import ensure
+        box = ensure()
+        if not box:
+            raise RuntimeError(
+                f"jump service could not provide a query box: {box.detail}")
+        url = f"http://{box.public_ip}:8080"
+        if self._engine_alive(url):
+            self._engine = url
+        else:
+            # box is up but the engine port doesn't answer (service down or
+            # security group): degrade to local scans, loudly — queries stay
+            # correct, only the in-region execution is lost
+            import sys
+            print(f"WARNING: query engine unreachable at {url}; "
+                  "falling back to local S3 scans", file=sys.stderr)
+        self._compute_checked = True
+
+    @staticmethod
+    def _engine_alive(url: str) -> bool:
+        import urllib.request
+        try:
+            with urllib.request.urlopen(f"{url}/health", timeout=3) as resp:
+                return resp.status == 200
+        except OSError:
+            return False
+
     @property
     def con(self) -> duckdb.DuckDBPyConnection:
         if self._con is None:
+            self._ensure_compute()
             con = duckdb.connect()
             con.execute(f"SET threads = {self.threads}")
             con.execute(f"SET memory_limit = '{self.memory_limit}'")
             if self.root.startswith("s3://"):
                 con.execute("INSTALL httpfs; LOAD httpfs;")
                 con.execute("SET http_retries = 8;")
-                if "AWS_ACCESS_KEY_ID" in os.environ:
+                region = os.environ.get("AWS_REGION", "eu-west-1")
+                # reads authenticate with the dedicated read-only factor-store
+                # keys, never with general-purpose AWS credentials
+                key_id = os.environ.get("AWS_FACTOR_READER_ACCESS_KEY_ID")
+                secret = os.environ.get("AWS_FACTOR_READER_SECRET_ACCESS_KEY")
+                if key_id and secret:
                     con.execute(f"""CREATE SECRET (TYPE s3,
-                        KEY_ID '{os.environ["AWS_ACCESS_KEY_ID"]}',
-                        SECRET '{os.environ["AWS_SECRET_ACCESS_KEY"]}',
-                        REGION '{os.environ.get("AWS_REGION", "eu-west-1")}')""")
+                        KEY_ID '{key_id}',
+                        SECRET '{secret}',
+                        REGION '{region}')""")
+                else:
+                    # no credentials: empty-config secret pins the region and
+                    # requests go unsigned — works on public-read prefixes
+                    con.execute(f"CREATE SECRET (TYPE s3, PROVIDER config, "
+                                f"REGION '{region}')")
             self._con = con
         return self._con
 
     def sql(self, query: str) -> pl.DataFrame:
-        # fetch_arrow_table, not .arrow(): the latter returns a
-        # RecordBatchReader (duckdb >= 1.5) whose zero-batch case polars
-        # refuses ("Must pass schema, or at least one RecordBatch")
-        table = self.con.execute(query).fetch_arrow_table()
+        self._ensure_compute()
+        if self._engine:
+            table = self._engine_query(query)
+        else:
+            # fetch_arrow_table, not .arrow(): the latter returns a
+            # RecordBatchReader (duckdb >= 1.5) whose zero-batch case polars
+            # refuses ("Must pass schema, or at least one RecordBatch")
+            table = self.con.execute(query).fetch_arrow_table()
         if table.num_rows == 0:
             table = table.schema.empty_table()   # empty frame, schema intact
         return pl.from_arrow(table)
+
+    def _engine_query(self, query: str):
+        """POST the query to the in-region engine; Arrow IPC stream back."""
+        import json
+        import urllib.error
+        import urllib.request
+
+        import pyarrow as pa
+        import pyarrow.ipc  # noqa: F401  (registers the ipc submodule)
+
+        req = urllib.request.Request(
+            f"{self._engine}/query", method="POST",
+            data=json.dumps({"sql": query}).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=900) as resp:
+                body = resp.read()
+        except urllib.error.HTTPError as e:
+            # the engine surfaces DuckDB errors as 400 + detail; re-raise
+            # with the text so a bad query reads the same as it does locally
+            raise RuntimeError(
+                "query engine error "
+                f"{e.code}: {e.read().decode(errors='replace')[:2000]}") from None
+        return pa.ipc.open_stream(body).read_all()
 
     # ------------------------------------------------------------ dimensions
     def dim(self, name: str) -> pl.DataFrame:

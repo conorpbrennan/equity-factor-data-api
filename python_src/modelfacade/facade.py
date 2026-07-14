@@ -37,6 +37,7 @@ class ModelFacade:
         self._model = model
         self.cache = cache or UserCache()
         self.output = output
+        self._frozen_latest: date | None = None   # set by from_cache only
 
     @classmethod
     def load(cls, model_id: str, root: str | None = None,
@@ -103,6 +104,11 @@ class ModelFacade:
     # --------------------------------------------------------------- leniency
     def _as_date(self, value, name: str = "as_of") -> date:
         if value in (None, "latest"):
+            # offline sessions (from_cache) freeze 'latest' at the working
+            # set's as-of date — resolving via the store would defeat the
+            # point of starting without one
+            if self._frozen_latest is not None:
+                return self._frozen_latest
             return self._model.dates()[1]
         if isinstance(value, datetime):
             return value.date()
@@ -334,7 +340,17 @@ class ModelFacade:
         target = (Path(path).expanduser() if path is not None else
                   self._cache_base() / self._coverage_end().isoformat()
                   / self.model_id)
-        return self.cache.to_disk(target, meta={"model_id": self.model_id})
+        out = self.cache.to_disk(target, meta={
+            "model_id": self.model_id,
+            "as_of": self._coverage_end().isoformat()})
+        # persist the dimension tables alongside the facts: they are what a
+        # later session needs to rebuild the Model without touching the
+        # store (from_cache), and they are tiny
+        dims = out / "dims"
+        dims.mkdir(exist_ok=True)
+        for name in ("model_master", "factor_master", "asset_xref"):
+            self._model.store.dim(name).write_parquet(dims / f"{name}.parquet")
+        return out
 
     def load_cache(self, path=None, as_of=None) -> dict:
         """Adopt a working set saved by ``save_cache()``.
@@ -354,19 +370,7 @@ class ModelFacade:
             FileNotFoundError: No saved set for this model.
             ValueError: The set was saved for a different model.
         """
-        if path is not None:
-            target = Path(path).expanduser()
-        elif as_of is not None:
-            target = (self._cache_base() / self._as_date(as_of).isoformat()
-                      / self.model_id)
-        else:
-            base = self._cache_base()
-            dates = sorted(d.name for d in base.glob("*")
-                           if (d / self.model_id / "manifest.json").exists())
-            if not dates:
-                raise FileNotFoundError(
-                    f"no saved working set for {self.model_id} under {base}")
-            target = base / dates[-1] / self.model_id   # ISO dates sort
+        target = self._resolve_saved(self.model_id, path, as_of)
         cache, meta = UserCache.from_disk(target)
         saved_for = meta.get("model_id")
         if saved_for != self.model_id:
@@ -374,3 +378,69 @@ class ModelFacade:
                              f" this facade is {self.model_id!r}")
         self.cache = cache
         return self.cache.stats
+
+    @classmethod
+    def _resolve_saved(cls, model_id: str, path=None, as_of=None) -> Path:
+        """Directory of a saved working set, by explicit path, key date, or
+        (with neither) the most recent date that has a set for the model."""
+        if path is not None:
+            return Path(path).expanduser()
+        if as_of is not None:
+            if isinstance(as_of, datetime):
+                as_of = as_of.date()
+            d = as_of if isinstance(as_of, date) else date.fromisoformat(as_of)
+            return cls._cache_base() / d.isoformat() / model_id
+        base = cls._cache_base()
+        dates = sorted(d.name for d in base.glob("*")
+                       if (d / model_id / "manifest.json").exists())
+        if not dates:
+            raise FileNotFoundError(
+                f"no saved working set for {model_id} under {base}")
+        return base / dates[-1] / model_id   # ISO dates sort
+
+    @classmethod
+    def from_cache(cls, model_id: str, root: str | None = None, *,
+                   path=None, as_of=None, output: str = "polars"
+                   ) -> "ModelFacade":
+        """Start a session entirely from a persisted working set.
+
+        Unlike ``load()`` + ``load_cache()``, this never touches the store:
+        the dimension tables come from the saved set (``save_cache()``
+        persists them alongside the facts), so no store connection is
+        opened — and no query box is launched — unless a later request
+        falls outside the cached coverage and has to fall through.
+        ``'latest'`` resolves to the set's as-of date; data is frozen as
+        of that date, so re-warm when it is older than your questions.
+
+        Args:
+            model_id: Model the set was saved for.
+            root: Store root for fall-through requests. Defaults to
+                ``$FACTOR_STORE_ROOT``; only contacted on a cache miss.
+            path: Exact saved-set directory (bypasses key resolution).
+            as_of: Pin a specific key date; latest available otherwise.
+            output: ``"polars"`` or ``"pandas"``, as in ``load()``.
+
+        Raises:
+            FileNotFoundError: No saved set, or one without dimension
+                tables (saved before dims were persisted — re-warm).
+            ValueError: The set was saved for a different model.
+        """
+        target = cls._resolve_saved(model_id, path, as_of)
+        cache, meta = UserCache.from_disk(target)
+        saved_for = meta.get("model_id")
+        if saved_for != model_id:
+            raise ValueError(f"cached working set was saved for {saved_for!r},"
+                             f" requested {model_id!r}")
+        dims = target / "dims"
+        if not dims.is_dir():
+            raise FileNotFoundError(
+                f"{target} has no dims/ — the set predates offline loading; "
+                "warm() and save_cache() again")
+        store = Store.open(root)
+        for f in dims.glob("*.parquet"):
+            store._dims[f.stem] = pl.read_parquet(f)   # pre-seed: no store I/O
+        fac = cls(Model(store, model_id), cache=cache, output=output)
+        fac._frozen_latest = (date.fromisoformat(meta["as_of"])
+                              if meta.get("as_of")
+                              else max(c.end for c in cache.coverage.values()))
+        return fac

@@ -4,7 +4,7 @@ A book arrives keyed by vendor security ids (as positions usually do).
 Resolve them through asset_xref, build the canonical Portfolio, and get
 value-weighted exposures — largest first.
 
-    python examples/exposures_today.py [--root DIR] [--model ID]
+    python examples/exposures_today.py [--aws | --root DIR] [--model ID]
 """
 
 from _bootstrap import setup

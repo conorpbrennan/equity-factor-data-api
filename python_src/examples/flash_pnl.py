@@ -5,7 +5,7 @@ same-day. The same decomposition runs on either — one keyword apart — so the
 flash number and tomorrow's official number come from one code path, not a
 bolted-on side system.
 
-    python examples/flash_pnl.py [--root DIR] [--model ID]
+    python examples/flash_pnl.py [--aws | --root DIR] [--model ID]
 """
 
 from _bootstrap import setup

@@ -83,7 +83,11 @@ def run_one(fac: ModelFacade, name: str, holdings: dict,
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Compute and persist per-portfolio analytics.")
-    ap.add_argument("--root", help="store root (default: $FACTOR_STORE_ROOT)")
+    grp = ap.add_mutually_exclusive_group()
+    grp.add_argument("--aws", action="store_true",
+                     help="the project S3 store (needs AWS_FACTOR_READER_* keys in env)")
+    grp.add_argument("--root",
+                     help="store root (default: $FACTOR_STORE_ROOT)")
     ap.add_argument("--model", default="AX_WW4_MH")
     ap.add_argument("--portfolios", help="JSON: name -> {asset_id: $mm}")
     ap.add_argument("--flash", action="store_true",
@@ -91,6 +95,9 @@ def main() -> int:
     ap.add_argument("--demo", action="store_true",
                     help="run against the persistent demo micro store")
     args = ap.parse_args()
+    if args.aws:
+        from modelfacade.store import AWS_ROOT
+        args.root = AWS_ROOT
 
     if args.demo:
         from modelfacade.selftest import MID, ensure_micro_store
