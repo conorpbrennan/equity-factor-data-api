@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Equity factor data — a working scaffold, measured at full scale</title>
+<style>
+  /* Single light theme, deliberately: Tufte's paper — light ground, dark ink,
+     every drop of ink carrying data. */
+  :root {
+    --surface: #fffffe; --ink: #1c2126; --ink-2: #43494f; --ink-3: #7d838a;
+    --hairline: #e6e7e9;
+    --line: #61676e;
+    --line-soft: #b3b8bd;
+    --accent: #3b6ea5;
+  }
+
+  body { background: var(--surface); color: var(--ink); margin: 0;
+         padding: 3.5rem 1.5rem 4rem;
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; }
+  main { max-width: 960px; margin: 0 auto; }
+
+  .eyebrow { font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+             color: var(--ink-3); margin: 0 0 .6rem; }
+  h1 { font-size: 1.55rem; font-weight: 650; margin: 0 0 .45rem; text-wrap: balance; }
+  .context { color: var(--ink-2); max-width: 76ch; margin: 0; }
+
+  .statrow { display: flex; flex-wrap: wrap; gap: 2.6rem; margin: 2.4rem 0 0;
+             padding: 1.1rem 0; border-top: 1px solid var(--hairline);
+             border-bottom: 1px solid var(--hairline); }
+  .stat .v { font-size: 1.35rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .v em { font-style: normal; color: var(--accent); }
+  .stat .k { font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
+             color: var(--ink-3); margin-top: .1rem; }
+
+  .section-h { font-size: 1.05rem; font-weight: 650; margin: 3rem 0 .2rem; text-wrap: balance; }
+  .section-sub { font-size: .82rem; color: var(--ink-2); margin: 0 0 .9rem; max-width: 82ch; }
+  p { color: var(--ink-2); max-width: 76ch; }
+  p .n, li .n { font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .callout { border-left: 3px solid var(--accent); padding: .15rem 0 .15rem 1.1rem;
+             margin: 1.4rem 0; max-width: 74ch; }
+  .callout p { margin: .35rem 0; }
+  .callout .lead { font-weight: 650; color: var(--ink); }
+
+  table { border-collapse: collapse; margin: 1rem 0 .4rem; font-variant-numeric: tabular-nums; }
+  th { font-size: .72rem; letter-spacing: .06em; text-transform: uppercase;
+       color: var(--ink-3); font-weight: 600; text-align: left;
+       padding: .35rem 1.4rem .35rem 0; border-bottom: 1px solid var(--line-soft); }
+  td { padding: .42rem 1.4rem .42rem 0; border-bottom: 1px solid var(--hairline);
+       color: var(--ink-2); }
+  td.num, th.num { text-align: right; }
+  td .win { color: var(--accent); font-weight: 650; }
+  .tbl-note { font-size: .76rem; color: var(--ink-3); margin: .3rem 0 0; max-width: 82ch; }
+
+  .cols2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+           gap: 0 3.5rem; }
+
+  ul.tight { margin: .4rem 0; padding-left: 1.1rem; color: var(--ink-2); max-width: 74ch; }
+  ul.tight li { margin: .35rem 0; }
+
+  figure { margin: 1.4rem 0 0; }
+  figure svg { display: block; width: 100%; height: auto; }
+  svg text { font: 11.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--ink-2); }
+  svg text.t { font-weight: 650; fill: var(--ink); font-size: 12px; }
+  svg text.s { fill: var(--ink-3); font-size: 10.5px; }
+  svg text.a { fill: var(--accent); font-weight: 650; font-size: 10.5px; }
+  svg rect.box { fill: none; stroke: var(--line-soft); stroke-width: 1; }
+  svg rect.boxa { fill: none; stroke: var(--accent); stroke-width: 1.3; }
+  svg line.flow { stroke: var(--line); stroke-width: 1; }
+  svg line.flowa { stroke: var(--accent); stroke-width: 1.3; }
+  svg line.flows { stroke: var(--line-soft); stroke-width: 1; stroke-dasharray: 3 3; }
+  .fig-note { font-size: .76rem; color: var(--ink-3); margin: .5rem 0 0; max-width: 82ch; }
+
+  footer { margin-top: 3.4rem; padding-top: 1rem; border-top: 1px solid var(--hairline);
+           font-size: .78rem; color: var(--ink-3); }
+</style>
+</head>
+<body>
+<main>
+
+<p class="eyebrow">Equity factor data · summary for Alex</p>
+<h1>A factor-model data layer, built and measured at beyond-SFM scale</h1>
+<p class="context">
+Over the last two weeks I built a working scaffold for vendor factor-model data —
+storage, access API, and portfolio analytics — against a full-scale synthetic
+dataset, with Chris Haltiner steering the requirements throughout. This page is
+the skim: what the measurements say, what was decided, and what remains open.
+Everything regenerates from config; the code and full benchmark reports are in
+the repo (<span class="mono">github.com/conorpbrennan/equity-factor-data-api</span>).
+</p>
+
+<div class="statrow">
+  <div class="stat"><div class="v">12 models · 20y</div><div class="k">incl. two global models</div></div>
+  <div class="stat"><div class="v">680 GB</div><div class="k">synthetic store, byte-reproducible</div></div>
+  <div class="stat"><div class="v"><em>all 12</em> queries</div><div class="k">won by materialized layouts</div></div>
+  <div class="stat"><div class="v"><em>~90×</em></div><div class="k">point-in-time via overlay</div></div>
+  <div class="stat"><div class="v">~130 MB</div><div class="k">full daily load, all 12 models</div></div>
+</div>
+
+<h2 class="section-h">The headline: materialize for the query, keep one source of truth</h2>
+<p class="section-sub">The single most consequential measurement in the exercise.</p>
+<p>
+Factor data is written once a day and read all day, in two shapes: cross-sections
+(one date, many assets — risk runs, screens) and time series (few assets or
+factors, many dates — history, drill-downs). Storing the data normalized
+(long-form) is right for correctness, restatements, and lineage — but querying it
+directly means re-pivoting on every read. The scaffold keeps the normalized store
+as the source of truth and <span class="n">materializes two query-shaped wide
+layouts</span> from it: date-major for cross-sections, asset-major for time
+series. Measured on the largest model (248 factors, 58,000 assets, 20 years —
+302M rows per layout):
+</p>
+
+<table>
+  <thead><tr><th>representative query</th><th class="num">normalized (pivot at query)</th><th class="num">materialized layout</th><th class="num">×</th></tr></thead>
+  <tbody>
+    <tr><td>full cross-section, one date, all 249 columns</td><td class="num">8.2 s</td><td class="num"><span class="win">0.16 s</span></td><td class="num">51×</td></tr>
+    <tr><td>risk-model pull (loadings → covariance → specific risk)</td><td class="num">8.8 s</td><td class="num"><span class="win">0.11 s</span></td><td class="num">80×</td></tr>
+    <tr><td>one asset, 20-year history, all factors</td><td class="num">12.3 s</td><td class="num"><span class="win">0.075 s</span></td><td class="num">164×</td></tr>
+    <tr><td>100 assets × 5 years × 3 factors</td><td class="num">2.5 s</td><td class="num"><span class="win">0.17 s</span></td><td class="num">15×</td></tr>
+    <tr><td>point-in-time (as-of) cross-section, restated date</td><td class="num">26.4 s</td><td class="num"><span class="win">0.30 s</span></td><td class="num">88×</td></tr>
+  </tbody>
+</table>
+<p class="tbl-note">Warm p50, full 12-query suite in the repo; the materialized
+layouts win every one of the twelve, cold and warm. Point-in-time needs no third
+copy: the wide layouts hold originally-published values and an overlay join pulls
+restated rows from the normalized store — on a date with 1.2M republished values
+the overlay answer is identical to the from-scratch answer, in 0.3s versus 27s.</p>
+
+<div class="callout">
+  <p class="lead">Adding a model must never become a project.</p>
+  <p>The wide layouts use one generic-column physical schema
+  (<span class="mono">F001…F260</span>) with a mapping table and generated
+  per-model views, rather than one table per model. Measured at full scale this
+  costs nothing — it matches per-model tables on every query — and adding a
+  model or a custom variant becomes mapping rows plus a view, not new tables
+  and data movement. Chris flagged model customization as a strong desire that
+  doesn't exist today; this design makes a variant cheap by construction.</p>
+</div>
+
+<h2 class="section-h">The dataset: sized from Chris's numbers, larger than today's estate</h2>
+<p>
+The store was built to the dimensions Chris provided from SFM practice, then
+extended to stress the design: <span class="n">12 models</span> — ten vendor
+models across US/EU/JP/EM in both Barra-style and Axioma-style conventions,
+including <span class="n">two global models</span> (the AXWW4-MH proxy: 248
+factors, 58k coverage / 13k estimation universe), plus <span class="n">two custom
+variants</span> of the kind SFM wants but doesn't run yet. Twenty years of daily
+history with factor returns, factor-mimicking portfolios, restatements, and a
+same-day estimate stream — about <span class="n">680 GB</span>. Chris's reference
+point is 5–10 vendor models in practice, so this deliberately exercises more
+models, more history, and bigger universes than SFM carries today. Generation is
+deterministic: built twice from the same config — laptop and AWS — the files came
+out byte-identical, so any finding can be reproduced from a one-page config.
+</p>
+
+<div class="callout">
+  <p class="lead">On technology: formats are a commitment, engines and platforms are not.</p>
+  <p><span class="n">Parquet</span> is the storage format — open, columnar, the
+  de-facto industry standard, readable from every stack, and a format I've run
+  in production for years. That choice should be uncontroversial.
+  <span class="n">DuckDB</span> appears here only as an open-source query engine
+  used as a measurement instrument — it made the benchmarks cheap to run locally
+  and in-region. Nothing in this work proposes it (or any engine) as SFM's
+  stack; the layout findings and timings above are properties of the data
+  organisation and transfer to whatever engine the data teams choose. The one
+  catalog effect measured — query planning that never touches file metadata —
+  is equally available from any open cataloged table format (Iceberg-class or
+  similar).</p>
+  <p>The sizes put the platform question in proportion: the full daily vendor
+  load across all twelve models is roughly <span class="n">130 MB</span>, the
+  twenty-year store is 680 GB in total, and a user's interactive working set is
+  megabytes. At these volumes query performance is decided by data organisation
+  — it is already saturated on commodity hardware, as the table above shows —
+  so a platform choice can be weighed on the things platforms genuinely
+  differentiate on: governance, entitlements, cataloging, operations, and
+  sharing. Any platform that reads open formats can adopt these layouts
+  unchanged, which makes the findings here an input to that evaluation rather
+  than a competitor to it.</p>
+</div>
+
+<h2 class="section-h">Architecture</h2>
+<figure>
+<svg viewBox="0 0 960 330" role="img" aria-label="Architecture schematic">
+  <!-- consumers -->
+  <rect class="box" x="10" y="30" width="180" height="120"/>
+  <text class="t" x="24" y="52">Consumers</text>
+  <text x="24" y="74">Risk notebooks (pandas)</text>
+  <text x="24" y="92">CLI runners &amp; morning jobs</text>
+  <text x="24" y="110">Natural-language sessions</text>
+  <text class="s" x="24" y="128">(Claude skill over the same API)</text>
+
+  <!-- facade -->
+  <rect class="boxa" x="250" y="20" width="220" height="150"/>
+  <text class="t" x="264" y="42">ModelFacade — user layer</text>
+  <text x="264" y="64">string dates · vendor ids</text>
+  <text x="264" y="82">canonical units · wide frames</text>
+  <text x="264" y="100">pandas out by default</text>
+  <text class="a" x="264" y="122">warmed cache answers covered</text>
+  <text class="a" x="264" y="136">requests locally</text>
+  <text class="s" x="264" y="154">1-day TTL · clear() on restatement</text>
+
+  <!-- engine (in the load path) -->
+  <rect class="box" x="530" y="44" width="180" height="106"/>
+  <text class="t" x="544" y="66">In-region query engine</text>
+  <text x="544" y="88">launched on demand (~2 min)</text>
+  <text x="544" y="106">scans next to the data</text>
+  <text x="544" y="124">warm range cache</text>
+  <text class="s" x="544" y="142">self-terminates 15 min idle</text>
+
+  <!-- store -->
+  <rect class="box" x="760" y="10" width="190" height="160"/>
+  <text class="t" x="774" y="32">Store — S3, Parquet</text>
+  <text x="774" y="54">normalized (source of truth,</text>
+  <text x="774" y="70">restatements, lineage)</text>
+  <text class="a" x="774" y="92">materialized wide layouts</text>
+  <text class="s" x="774" y="108">date-major + asset-major</text>
+  <text x="774" y="130">dimension tables</text>
+  <text class="s" x="774" y="148">models · factors · assets · xref</text>
+
+  <!-- flows: consumers -> facade -> engine -> store, dashed direct bypass -->
+  <line class="flow" x1="190" y1="95" x2="250" y2="95"/>
+  <line class="flowa" x1="470" y1="80" x2="530" y2="80"/>
+  <text class="a" x="500" y="70" text-anchor="middle">on miss:</text>
+  <text class="a" x="500" y="94" text-anchor="middle">SQL</text>
+  <line class="flowa" x1="710" y1="80" x2="760" y2="80"/>
+  <line class="flows" x1="470" y1="30" x2="760" y2="30"/>
+  <text class="s" x="612" y="24" text-anchor="middle">no engine? direct S3 scans — slower, same results</text>
+
+  <!-- core library: fed by the facade, no I/O of its own -->
+  <rect class="box" x="530" y="200" width="180" height="92"/>
+  <text class="t" x="544" y="222">Core library — strict</text>
+  <text x="544" y="244">all data passed in — no I/O</text>
+  <text x="544" y="262">exact types, validated values</text>
+  <text class="s" x="544" y="280">systems &amp; analytics build here</text>
+  <line class="flow" x1="470" y1="160" x2="500" y2="160"/>
+  <line class="flow" x1="500" y1="160" x2="500" y2="246"/>
+  <line class="flow" x1="500" y1="246" x2="530" y2="246"/>
+  <text class="s" x="508" y="190">data passed in</text>
+
+  <!-- offline working set -->
+  <rect class="box" x="250" y="200" width="220" height="92"/>
+  <text class="t" x="264" y="222">Persisted working set</text>
+  <text x="264" y="244">parquet + dims, keyed by date/model</text>
+  <text x="264" y="262">morning job warms once</text>
+  <text class="s" x="264" y="280">later sessions start hot, offline</text>
+  <line class="flows" x1="360" y1="170" x2="360" y2="200"/>
+  <text class="s" x="264" y="188">save / cold-start (zero store contact)</text>
+</svg>
+</figure>
+<p class="fig-note">Two layers with two contracts: a lenient facade humans
+actually use, and a strict core library that performs no I/O — every input is
+passed in, validated, exact. The facade is the only component that loads:
+covered requests are answered from its warmed working set locally, and a miss
+sends SQL to the on-demand in-region engine, which scans the Parquet next to
+the data and shuts down when the queries stop. With no engine configured the
+facade scans S3 directly — slower, same results. Loading, unit conversion and
+id resolution therefore live in one place, and the core stays pure enough for
+any system to build on.</p>
+
+<h2 class="section-h">Where compute belongs: a requirement, measured</h2>
+<p class="section-sub">Bulk work near the data, once; interactive work on the user's machine, all day.</p>
+<p>
+One usage requirement fell out of measurement rather than preference. The store
+lives in AWS Ireland by design: the client-to-store distance from a New York
+laptop mirrors what a London user would experience against a US-region store.
+Most of SFM is US-based and would sit in-region with the data, so the
+cross-Atlantic numbers here are a conservative upper bound — the worst
+seat in the house, not the typical one. Scanning the store across that
+distance ran a twelve-question scripted
+session in <span class="n">1,099 s</span>; routing the same scans to a small
+on-demand node in-region halved it to <span class="n">546 s</span>, and a
+repeated scan dropped a further ~10× (<span class="n">2.6 s → 0.26 s</span>)
+served from the engine's own in-memory cache — server-side, shared by all
+users while the node is up. So scans belong next to the data. But
+the larger effect runs the other way: a scheduled morning job — run centrally
+per desk in a deployed setup; a cron entry on the user's machine in the
+scaffold — warms the day's working set from the position list, once, and
+persists it. Every covered question after that is answered
+<span class="n">on the user's machine, in-process, in milliseconds</span> —
+whole sessions that never contact the store at all. Risk users work in
+notebooks with local DataFrames; an access layer that pushes their interactive
+loop to remote compute fights how they actually work. The design conclusion:
+push the heavy scans to the data once a day, then keep the day local.
+</p>
+
+<h2 class="section-h">What runs on top</h2>
+<p><span class="n">The facade is far more than the loader.</span> Everything a
+user needs and a strict core must refuse lives in this one layer, so it is
+defined once, identically for every consumer:</p>
+<ul class="tight">
+  <li><span class="n">leniency at the boundary</span> — dates as strings,
+      <span class="mono">'latest'</span>, or proper types; assets as internal
+      ids or any vendor scheme, resolved through the dated cross-reference;
+      unknown ids fail loudly rather than silently dropping from results</li>
+  <li><span class="n">one set of canonical units</span> — Barra and Axioma
+      publish returns and risk in different raw conventions; the facade
+      converts exactly once, on the way out, so no two consumers can ever
+      hold different numbers for the same quantity</li>
+  <li><span class="n">notebook-shaped output</span> — wide frames (one column
+      per factor), pandas by default per the installed base, polars as an
+      opt-in; conversion happens at the return boundary only</li>
+  <li><span class="n">discoverability</span> — <span class="mono">list_models()</span>,
+      <span class="mono">describe()</span>, styles vs industry factors, date
+      ranges, raw vendor conventions: orientation without tribal knowledge</li>
+  <li><span class="n">working-set lifecycle</span> — warm from a position
+      list, persist, cold-start offline, 1-day TTL, explicit
+      <span class="mono">clear()</span> on a restatement: cache behaviour is
+      policy in one place, not folklore per notebook</li>
+</ul>
+<div class="cols2">
+<div>
+<p><span class="n">Analytics, stateless over the core:</span></p>
+<ul class="tight">
+  <li>portfolio exposures and active-vs-benchmark tilts</li>
+  <li>PnL attribution, with <span class="n">flash PnL</span> the same
+      decomposition on a same-day estimate stream (FMP weights × asset
+      returns) — the flash-to-official revision is only the return stream
+      swapping underneath</li>
+  <li>exposure-change drill-down: which factor moved, then which assets drove it</li>
+  <li>a batch runner that computes and persists all of this per portfolio, cron-ready</li>
+</ul>
+</div>
+<div>
+<p><span class="n">Conventions as code:</span></p>
+<ul class="tight">
+  <li>column names as shared constants; legacy naming sanitized at the boundary</li>
+  <li>unit conventions as executable conversions — Barra and Axioma publish in
+      different raw units; the facade returns one canonical set</li>
+  <li>identifier schemes as string constants over a dated cross-reference —
+      vendor ids in, internal ids inside, never chained vendor-to-vendor</li>
+  <li>a static model inventory so model ids are imported, never re-typed</li>
+</ul>
+</div>
+</div>
+<h2 class="section-h">Plain-English access — and a usability test of the API</h2>
+<p class="section-sub">A one-page skill file teaches an AI assistant the two packages; the assistant writes and runs real code.</p>
+<p>
+The repo carries a Claude skill: a single page of instructions describing the
+facade and analytics APIs, their conventions, and a handful of worked recipes.
+With it, a session answers questions like <span class="n">"I hold 10mm of
+asset 1, 20mm of asset 2, short 5mm of asset 3 — what are my factor exposures
+today?"</span> or <span class="n">"my momentum exposure moved — where is it
+coming from?"</span> by writing and executing real snippets against the same
+API every user has, and answering from the resulting frames. Nothing is
+recalled or approximated: every number in an answer was computed live, and the
+snippet that produced it is in the transcript, so any answer is verifiable.
+</p>
+<p>
+A twelve-prompt scripted session — discovery, data pulls, portfolio analytics,
+flash-vs-official PnL, the exposure-change drill-down, the cache workflow, and
+deliberate error cases — ran unattended end-to-end against the full AWS store;
+the transcript with per-prompt timings ships in the repo, alongside its
+micro-store twin. The error cases matter most: handed a string date, the
+session relayed the strict core's exact refusal; asked for an estimate stream
+on a store that carries none, it reported the precise error rather than
+quietly substituting official numbers — the fail-loud design surviving contact
+with a language model.
+</p>
+<p>
+The deeper value is what it proves about the API itself: if a model can drive
+the whole layer correctly from one page of instructions and the READMEs, a new
+joiner can too. The skill doubles as a continuous usability test — every place
+the assistant stumbles is a place a human would have.
+</p>
+
+<h2 class="section-h">The method is the generic part</h2>
+<p class="section-sub">Chris's steer: the solution should be generic, not factor-model-specific. Agreed — what generalizes is the method.</p>
+<p>
+Nothing above depends on factors. The sequence is: enumerate the query patterns
+first; keep one normalized, restatement-carrying source of truth; materialize a
+layout per dominant query shape; make the physical schema generic —
+<span class="n">slots plus a mapping table plus generated views</span> — so
+extending it (a new vendor, a new model variant, a new field) is rows, not DDL
+or data movement; and put a catalog over the files so query planning is a
+metadata lookup, not a scan. Factor models made a good demonstration because
+their shapes are unforgiving — a 250-column cross-section one moment, a
+twenty-year single-asset path the next — but positions, prices, and
+sensitivities data share the same read-mostly, shape-polarized character. The
+slot model is specifically how a schema absorbs the next addition without a
+migration, which is the property that keeps a generic design generic.
+</p>
+
+<h2 class="section-h">Decided with Chris, and what's open</h2>
+<div class="cols2">
+<div>
+<p><span class="n">Settled (implemented):</span></p>
+<ul class="tight">
+  <li>user layer speaks <span class="n">pandas</span> by default — the installed
+      notebook base is pandas-native; polars stays a per-facade opt-in</li>
+  <li><span class="mono">sec_id_type</span> is a plain string with shared
+      constants — odd schemes need no code change</li>
+  <li>cache invalidation: 1-day TTL on persisted working sets (morning re-warm
+      cadence) plus <span class="mono">clear()</span> for known restatements</li>
+  <li>model discoverability: static inventory now; target state is the
+      inventory living in the curated store itself</li>
+  <li>conventions governance: firm-wide conventions curated with other teams
+      and ratified by Alex; model-specific ones handled separately</li>
+</ul>
+</div>
+<div>
+<p><span class="n">Open, deliberately:</span></p>
+<ul class="tight">
+  <li>canonical units at the core layer vs the facade (Chris leans core;
+      I'm inclined to agree — it's a load-bearing refactor, sketch first)</li>
+  <li>core operating on native vendor security ids (today's FMA practice)
+      vs internal integer ids (as built)</li>
+  <li>ModelFacade ownership — QDS-adjacent or Risk-owned; my lean is Risk,
+      given it is almost entirely a usability layer</li>
+  <li>trading-day count as a per-model property (252 vs 260/261 for some
+      global models)</li>
+  <li>FMP time-series queries want the same dual materialization as loadings,
+      if that access pattern is real</li>
+</ul>
+</div>
+</div>
+
+<footer>
+Prepared by Conor Brennan · 14 July 2026 · reviewed with Chris Haltiner before
+circulation · code, spec, benchmark suite and full reports:
+<span class="mono">github.com/conorpbrennan/equity-factor-data-api</span>
+</footer>
+
+</main>
+</body>
+</html>
