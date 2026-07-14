@@ -260,6 +260,20 @@ facade scans S3 directly — slower, same results. Loading, unit conversion and
 id resolution therefore live in one place, and the core stays pure enough for
 any system to build on.</p>
 
+<div class="callout">
+  <p class="lead">Design principle: the core computes; it never loads.</p>
+  <p>All data enters the core library by being passed in — validated, exact,
+  canonical. It performs no I/O of its own. That buys three things: the core
+  is deterministic and trivially testable (no store, no network, no clock in
+  the way); there is exactly <span class="n">one load path</span> in the
+  system, so unit conversion, identifier resolution, and any future
+  entitlement or audit control happen in one place rather than wherever a
+  query happened to run; and the core is portable — it computes the same
+  answer whether the data arrived from S3, a warmed local set, or a future
+  platform's tables. The strict/lenient split only works because of this:
+  leniency lives where the loading is, purity lives where the maths is.</p>
+</div>
+
 <h2 class="section-h">Where compute belongs: a requirement, measured</h2>
 <p class="section-sub">Bulk work near the data, once; interactive work on the user's machine, all day.</p>
 <p>
