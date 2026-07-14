@@ -27,6 +27,21 @@ from modelfacade.selftest import ensure_micro_store, MID
 root, model_id = str(ensure_micro_store()), MID   # AX_TEST1_MH, 6 assets
 ```
 
+**Start hot when a working set exists.** On an s3:// store, plain
+`ModelFacade.load()` contacts the store (and launches the in-region query
+box) just to read dimensions. Prefer the offline cold start — it touches
+nothing until a request falls outside the saved coverage:
+
+```python
+try:
+    fac = ModelFacade.from_cache(model_id, root)   # dims + facts from disk
+except FileNotFoundError:
+    fac = ModelFacade.load(model_id, root)         # no saved set — go live
+```
+
+`from_cache` freezes `'latest'` at the set's as-of date; fall back to
+`load()` when the question needs fresher data than the saved set.
+
 ## Data access — one-liners
 
 ```python
@@ -120,6 +135,8 @@ than writing from scratch.
   takes strings. Never pass datetimes to `Portfolio.from_holdings`.
 - PnL decomposition holds positions constant over the window (buy-and-hold).
 - Cache: `fac.warm(assets)` then repeated covered queries are memory-served;
-  `fac.load_cache()` adopts a set persisted by `python warm_cache.py`.
+  `fac.load_cache()` adopts a set persisted by `python warm_cache.py`, and
+  `ModelFacade.from_cache(model_id, root)` cold-starts from one with zero
+  store contact (see Setup).
 - Verify claims with `python -m modelfacade selftest` (12 checks) and
   `python -m analytics selftest` (6 checks).
