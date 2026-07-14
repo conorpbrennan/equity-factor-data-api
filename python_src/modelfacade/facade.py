@@ -10,15 +10,15 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
 import polars as pl
 
 from conventions import (ASSET_ID, COB_DATE, FACTOR_ID, SPECIFIC_RISK,
-                         T0_ESTIMATE, VALUE, SecurityIDType,
-                         scale_to_canonical)
+                         T0_ESTIMATE, VALUE, scale_to_canonical,
+                         sec_id_type_str)
 
 from .cache import Coverage, UserCache
 from .core import Model
@@ -128,7 +128,7 @@ class ModelFacade:
             return assets
         xref = self._model.store.dim("asset_xref")
         if sec_id_type is not None:
-            xref = xref.filter(pl.col("vendor") == str(SecurityIDType(sec_id_type)))
+            xref = xref.filter(pl.col("vendor") == sec_id_type_str(sec_id_type))
         wanted = [str(a) for a in assets]
         hits = xref.filter(pl.col("vendor_asset_id").is_in(wanted))
         missing = set(wanted) - set(hits["vendor_asset_id"])
@@ -153,7 +153,7 @@ class ModelFacade:
             assets: Internal int ids, or vendor id strings resolved via
                 asset_xref. None = all covered assets.
             sec_id_type: Pin the vendor scheme of ``assets``
-                (``SecurityIDType``); omit to auto-detect.
+                (a scheme string; constants on ``SecurityIDType``); omit to auto-detect.
             factors: Subset of factor ids; None = all factors.
             wide: One column per factor in factor_seq order, absent
                 one-hots filled 0.0 (default). False returns sparse long
@@ -352,23 +352,30 @@ class ModelFacade:
             self._model.store.dim(name).write_parquet(dims / f"{name}.parquet")
         return out
 
-    def load_cache(self, path=None, as_of=None) -> dict:
+    def load_cache(self, path=None, as_of=None, *,
+                   max_age_days: float | None = 1.0) -> dict:
         """Adopt a working set saved by ``save_cache()``.
 
-        Data is frozen as of its key date — re-warm when it's older than
-        the questions you're asking.
+        Saved sets carry a TTL: the pre-warm pattern is a refresh every
+        morning, so by default a set more than a day old refuses to load
+        (re-warm, or pass ``max_age_days=None`` to accept it knowingly).
+        Data is frozen as of its key date either way — ``clear()`` and
+        re-warm on a known restatement.
 
         Args:
             path: Exact directory (bypasses key resolution).
             as_of: Pin a specific key date. With neither argument, the
                 most recent date that has a set for this model wins.
+            max_age_days: Maximum age of the saved set since it was
+                written; ``None`` disables the check.
 
         Returns:
             Cache stats (counters start at zero for the new session).
 
         Raises:
             FileNotFoundError: No saved set for this model.
-            ValueError: The set was saved for a different model.
+            ValueError: The set was saved for a different model, or is
+                older than ``max_age_days``.
         """
         target = self._resolve_saved(self.model_id, path, as_of)
         cache, meta = UserCache.from_disk(target)
@@ -376,8 +383,26 @@ class ModelFacade:
         if saved_for != self.model_id:
             raise ValueError(f"cached working set was saved for {saved_for!r},"
                              f" this facade is {self.model_id!r}")
+        self._check_set_age(meta, max_age_days, target)
         self.cache = cache
         return self.cache.stats
+
+    @staticmethod
+    def _check_set_age(meta: dict, max_age_days: float | None,
+                       target: Path) -> None:
+        """TTL gate for a saved working set (skipped for sets predating the
+        saved_at stamp — age unknown beats unusable)."""
+        if max_age_days is None or not meta.get("saved_at"):
+            return
+        saved_at = datetime.fromisoformat(meta["saved_at"])
+        if saved_at.tzinfo is None:            # foreign writer: assume UTC
+            saved_at = saved_at.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - saved_at
+        if age.total_seconds() > max_age_days * 86400:
+            raise ValueError(
+                f"working set at {target} is {age.days}d "
+                f"{age.seconds // 3600}h old (TTL {max_age_days}d) — re-warm "
+                "and save_cache(), or pass max_age_days=None to accept it")
 
     @classmethod
     def _resolve_saved(cls, model_id: str, path=None, as_of=None) -> Path:
@@ -400,8 +425,8 @@ class ModelFacade:
 
     @classmethod
     def from_cache(cls, model_id: str, root: str | None = None, *,
-                   path=None, as_of=None, output: str = "polars"
-                   ) -> "ModelFacade":
+                   path=None, as_of=None, output: str = "polars",
+                   max_age_days: float | None = 1.0) -> "ModelFacade":
         """Start a session entirely from a persisted working set.
 
         Unlike ``load()`` + ``load_cache()``, this never touches the store:
@@ -411,6 +436,8 @@ class ModelFacade:
         falls outside the cached coverage and has to fall through.
         ``'latest'`` resolves to the set's as-of date; data is frozen as
         of that date, so re-warm when it is older than your questions.
+        Like ``load_cache()``, a set older than ``max_age_days`` (default
+        1 day — the morning-refresh TTL) refuses to load.
 
         Args:
             model_id: Model the set was saved for.
@@ -419,11 +446,13 @@ class ModelFacade:
             path: Exact saved-set directory (bypasses key resolution).
             as_of: Pin a specific key date; latest available otherwise.
             output: ``"polars"`` or ``"pandas"``, as in ``load()``.
+            max_age_days: TTL for the saved set; ``None`` disables.
 
         Raises:
             FileNotFoundError: No saved set, or one without dimension
                 tables (saved before dims were persisted — re-warm).
-            ValueError: The set was saved for a different model.
+            ValueError: The set was saved for a different model, or is
+                older than ``max_age_days``.
         """
         target = cls._resolve_saved(model_id, path, as_of)
         cache, meta = UserCache.from_disk(target)
@@ -431,6 +460,12 @@ class ModelFacade:
         if saved_for != model_id:
             raise ValueError(f"cached working set was saved for {saved_for!r},"
                              f" requested {model_id!r}")
+        cls._check_set_age(meta, max_age_days, target)
+        if root is None and not os.environ.get("FACTOR_STORE_ROOT"):
+            # genuinely offline machine: fine for covered sessions — only a
+            # request outside the saved coverage needs a store, and this
+            # placeholder makes that fall-through fail loudly when it does
+            root = "no-store-configured(offline-from_cache-session)"
         dims = target / "dims"
         if not dims.is_dir():
             raise FileNotFoundError(

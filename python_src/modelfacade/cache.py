@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import polars as pl
@@ -83,13 +83,23 @@ class UserCache:
         rows = {k: len(v) for k, v in self.frames.items()}
         return {"hits": self.hits, "misses": self.misses, "rows": rows}
 
+    def clear(self) -> None:
+        """Invalidate the whole working set (e.g. on a known restatement):
+        every frame and coverage declaration is dropped, so all requests
+        fall through to the store until the next warm(). Session counters
+        are kept — they describe the session, not the working set."""
+        self.frames.clear()
+        self.coverage.clear()
+
     # ------------------------------------------------------------ persistence
     def to_disk(self, path: str | Path, meta: dict | None = None) -> Path:
         """Write the working set under `path`: one parquet per dataset plus
         manifest.json (coverage + caller-supplied meta, e.g. model_id)."""
         path = Path(path).expanduser()
         path.mkdir(parents=True, exist_ok=True)
-        manifest: dict = {"meta": meta or {}, "datasets": {}}
+        saved_at = datetime.now(timezone.utc).isoformat()
+        manifest: dict = {"meta": {**(meta or {}), "saved_at": saved_at},
+                          "datasets": {}}
         for name, frame in self.frames.items():
             frame.write_parquet(path / f"{name}.parquet")
             cov = self.coverage[name]

@@ -25,9 +25,11 @@ def setup(description: str) -> tuple[str, str]:
     ap.add_argument("--model", default=None, help="model id")
     args = ap.parse_args()
     if args.aws:
+        from modelfacade import inventory
         from modelfacade.store import AWS_ROOT
-        return AWS_ROOT, args.model or "AX_WW4_MH"
+        return AWS_ROOT, args.model or inventory.DEFAULT_MODEL
     if args.root:
-        return args.root, args.model or "AX_WW4_MH"
+        from modelfacade import inventory
+        return args.root, args.model or inventory.DEFAULT_MODEL
     from modelfacade.selftest import MID, ensure_micro_store
     return str(ensure_micro_store()), args.model or MID

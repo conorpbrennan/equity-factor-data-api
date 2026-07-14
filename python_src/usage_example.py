@@ -20,6 +20,8 @@ from pathlib import Path
 
 import polars as pl
 
+from modelfacade import inventory
+
 
 def section(n: int, title: str, desc: str) -> None:
     """Header plus a wrapped explanation, so the output narrates itself."""
@@ -33,7 +35,8 @@ def main() -> None:
     grp.add_argument("--aws", action="store_true",
                      help="the project S3 store (needs AWS_FACTOR_READER_* keys in env)")
     grp.add_argument("--root", help="real v2 store root (default: micro store)")
-    ap.add_argument("--model", default="AX_WW4_MH", help="model id with --root")
+    ap.add_argument("--model", default=inventory.DEFAULT_MODEL,
+                    help="model id with --root")
     args = ap.parse_args()
     if args.aws:
         from modelfacade.store import AWS_ROOT
@@ -45,7 +48,8 @@ def main() -> None:
         shared string constants (reference the constant, never re-type the
         literal); legacy naming is sanitized at the boundary by the adapter
         toolkit; unit conventions are executable conversions — every one a
-        multiplier into canonical units; identifier schemes are a typed enum
+        multiplier into canonical units; identifier schemes are plain strings
+        with shared constants for the usual ones
         so 'barra' vs 'Barra' vs 'BARRA_ID' cannot drift.""")
 
     # Canonical column names are shared string constants — code references
@@ -69,7 +73,8 @@ def main() -> None:
     print("scale_to_canonical('covariance',    'daily_var')   ->",
           scale_to_canonical("covariance", "daily_var"))
 
-    # Identifier schemes are a closed enum matching asset_xref.vendor.
+    # Identifier schemes are plain strings matching asset_xref.vendor —
+    # constants for the usual ones, any string for an odd one-off.
     from conventions import SecurityIDType, sec_id_col
     print("SecurityIDType.AXIOMA ->", SecurityIDType.AXIOMA,
           "| sec_id_col(BARRA) ->", sec_id_col(SecurityIDType.BARRA))

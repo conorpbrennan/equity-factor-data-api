@@ -43,6 +43,13 @@ explicit conversion between them.
   (`$FACTOR_CACHE_DIR` overrides the base), so one scheduled warm serves
   later sessions; `load_cache()` defaults to the newest date for its model
   and refuses a set saved for a different model
+- **invalidation**: saved sets carry a 1-day TTL (the pattern is a morning
+  re-warm; pass `max_age_days=None` to knowingly accept an older set), and
+  `cache.clear()` drops the whole working set on a known restatement —
+  every request then falls through to the store until the next `warm()`
+- **offline cold start**: `from_cache(model_id, root)` rebuilds a session
+  from a saved set (dims included) with zero store contact; `'latest'`
+  freezes at the set's as-of date
 
 Composition keeps the layers honest: `ModelFacade(model)` wraps, `.core`
 unwraps, and user-cache leniency cannot leak into core computations.

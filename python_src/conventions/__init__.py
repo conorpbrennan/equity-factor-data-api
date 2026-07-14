@@ -19,7 +19,7 @@ from .columns import (
     SPECIFIC_RISK, T0_ESTIMATE, TYPE, VALUE, VERSION_ID, WEIGHT,
     rename_snake, snake_case,
 )
-from .identifiers import SecurityIDType, sec_id_col
+from .identifiers import SecurityIDType, sec_id_col, sec_id_type_str
 from .units import CANONICAL, TRADING_DAYS, scale_to_canonical
 from .signatures import CANONICAL_PARAMS
 
@@ -29,7 +29,7 @@ __all__ = [
     "SEC_ID_TYPE", "SPECIFIC_RISK", "T0_ESTIMATE", "TYPE", "VALUE",
     "VERSION_ID", "WEIGHT",
     "rename_snake", "snake_case",
-    "SecurityIDType", "sec_id_col",
+    "SecurityIDType", "sec_id_col", "sec_id_type_str",
     "CANONICAL", "TRADING_DAYS", "scale_to_canonical",
     "CANONICAL_PARAMS",
 ]

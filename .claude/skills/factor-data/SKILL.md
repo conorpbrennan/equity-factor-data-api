@@ -35,12 +35,18 @@ nothing until a request falls outside the saved coverage:
 ```python
 try:
     fac = ModelFacade.from_cache(model_id, root)   # dims + facts from disk
-except FileNotFoundError:
-    fac = ModelFacade.load(model_id, root)         # no saved set — go live
+except (FileNotFoundError, ValueError):            # no set, or stale (1d TTL)
+    fac = ModelFacade.load(model_id, root)         # go live
 ```
 
 `from_cache` freezes `'latest'` at the set's as-of date; fall back to
-`load()` when the question needs fresher data than the saved set.
+`load()` when the question needs fresher data than the saved set. On a
+known restatement, `fac.cache.clear()` invalidates the working set.
+
+Model ids: import from the static inventory instead of typing literals —
+`from modelfacade import inventory` → `inventory.AX_WW4_MH`,
+`inventory.DEFAULT_MODEL`, `inventory.INVENTORY` (id → ModelInfo with
+vendor/region/factor counts/unit conventions, no store contact needed).
 
 ## Data access — one-liners
 

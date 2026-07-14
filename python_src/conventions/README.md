@@ -17,7 +17,7 @@ One small package, four modules, each one row of the straw-man table:
 | module | decision | straw man |
 |---|---|---|
 | `columns` | column-name case + shared string constants | snake_case; one constant per column name, imported everywhere, never re-typed |
-| `identifiers` | security identifier schema | `sec_id` + `sec_id_type` for single-scheme frames; explicit `sec_id_<scheme>` columns for multi-scheme; typed enum for the scheme values |
+| `identifiers` | security identifier schema | `sec_id` + `sec_id_type` for single-scheme frames; explicit `sec_id_<scheme>` columns for multi-scheme; shared string constants for the scheme values (any string allowed) |
 | `columns` (streams) | publication streams | `type = OFFICIAL \| T0_ESTIMATE` as ordinary rows; orthogonal to `version_id` (restatements — an official row can itself be restated); the stream toggle is an equality filter, never a join |
 | `units` | scale and frequency per quantity | returns daily decimal; vol annualized decimal; covariance annualized decimal²; money in millions USD — all conversions executable via `scale_to_canonical()` |
 | `signatures` | function argument naming | `as_of` / `start` / `end` / `assets` / `factors` / `model`; a `DISCOURAGED` map of spellings seen in the wild |
@@ -42,8 +42,9 @@ imports the constants; anything legacy is handled by the mini toolkit
 
 - Who ratifies? These need a single owner with the standing to make them
   stick; a library can enforce spellings, not adoption.
-- Is `sec_id_type` a free string or the closed enum? Closed here (drift-proof)
-  but that makes adding a scheme a code change.
+- ~~Is `sec_id_type` a free string or the closed enum?~~ Resolved: a plain
+  string with shared constants for the usual schemes — odd one-offs need no
+  code change, the constants keep known schemes typo-proof.
 - Do canonical units belong to the core layer or the user layer? (See
   modelfacade/README.md — this scaffold puts conversion at the user layer and
   keeps core raw; the reverse is defensible.)

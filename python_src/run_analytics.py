@@ -35,7 +35,7 @@ import polars as pl
 
 from analytics import (Portfolio, exposure_change, exposures,
                        pnl_decomposition)
-from modelfacade import ModelFacade
+from modelfacade import ModelFacade, inventory
 
 
 def results_base() -> Path:
@@ -88,7 +88,7 @@ def main() -> int:
                      help="the project S3 store (needs AWS_FACTOR_READER_* keys in env)")
     grp.add_argument("--root",
                      help="store root (default: $FACTOR_STORE_ROOT)")
-    ap.add_argument("--model", default="AX_WW4_MH")
+    ap.add_argument("--model", default=inventory.DEFAULT_MODEL)
     ap.add_argument("--portfolios", help="JSON: name -> {asset_id: $mm}")
     ap.add_argument("--flash", action="store_true",
                     help="PnL on the T0 estimate stream instead of official")

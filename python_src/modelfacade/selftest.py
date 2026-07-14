@@ -353,6 +353,9 @@ def check_facade_identifiers(root):
     wide = fac.get_factor_loadings("latest", assets=["AX0000003", "AX0000005"],
                                    sec_id_type=SecurityIDType.AXIOMA)
     assert sorted(wide["asset_id"]) == [3, 5]
+    lower = fac.get_factor_loadings("latest", assets=["AX0000003"],
+                                    sec_id_type="axioma")   # plain string, any case
+    assert lower["asset_id"].to_list() == [3]
     auto = fac.get_factor_loadings("latest", assets=["B0000004"])  # detected
     assert auto["asset_id"].to_list() == [4]
     try:
@@ -433,6 +436,11 @@ def check_cache_prewarm(root):
     out = fac.get_factor_loadings("latest", assets=[6])        # outside scope
     assert out["asset_id"].to_list() == [6]                    # ...but correct
     assert fac.cache.stats["misses"] == 2
+    fac.cache.clear()                        # known restatement: invalidate
+    assert fac.cache.stats["rows"] == {}
+    again = fac.get_factor_loadings("2025-01-10", assets=[1, 2])  # was covered
+    assert fac.cache.stats["misses"] == 3    # ...now falls through, correctly
+    assert sorted(again["asset_id"]) == [1, 2]
 
 
 def check_cache_persistence(root):
@@ -467,6 +475,19 @@ def check_cache_persistence(root):
         assert b.cache.frames["factor_loading"].equals(
             a.cache.frames["factor_loading"])           # lossless round trip
         b.load_cache(as_of=DATES[-1])                   # pinned date works too
+
+        # TTL: a set saved >1 day ago refuses by default, loads on opt-out
+        import json as _json
+        mpath = saved_to / "manifest.json"
+        m = _json.loads(mpath.read_text())
+        m["meta"]["saved_at"] = "2020-01-01T00:00:00+00:00"
+        mpath.write_text(_json.dumps(m))
+        try:
+            b.load_cache()
+            raise AssertionError("stale working set accepted")
+        except ValueError as e:
+            assert "TTL" in str(e)
+        b.load_cache(max_age_days=None)                 # explicit opt-out
 
         other = ModelFacade.load("BARRA_TEST1_L", str(root))
         try:
@@ -506,8 +527,37 @@ def check_from_cache_offline(root):
         assert b.cache.stats["hits"] == 3 and b.cache.stats["misses"] == 0
         assert store._con is None, "covered session touched the store"
         assert b._frozen_latest == DATES[-1]             # 'latest' is frozen
+
+        # a machine with no store configured at all can still start hot
+        prior = os.environ.pop("FACTOR_STORE_ROOT", None)
+        try:
+            c = ModelFacade.from_cache(MID)
+            c.get_factor_returns(DATES[0], DATES[-1])
+            assert c.cache.stats["hits"] == 1
+        finally:
+            if prior is not None:
+                os.environ["FACTOR_STORE_ROOT"] = prior
     finally:
         del os.environ["FACTOR_CACHE_DIR"]
+
+
+def check_inventory(root):
+    """The static model inventory (discoverability stage 1): id constants
+    and INVENTORY agree, the default model is real, and the ModelInfo
+    schema matches the store's model_master columns — so inventory drift
+    against the store layout fails here, not in a user's script."""
+    import dataclasses
+
+    from . import inventory
+
+    assert set(inventory.model_ids()) == set(inventory.INVENTORY)
+    for mid, info in inventory.INVENTORY.items():
+        assert mid == info.model_id
+        assert getattr(inventory, mid) == mid          # constant round trip
+    assert inventory.DEFAULT_MODEL in inventory.INVENTORY
+    cols = Store.open(str(root)).dim("model_master").columns
+    fields = [f.name for f in dataclasses.fields(inventory.ModelInfo)]
+    assert fields == cols, (fields, cols)              # schema drift guard
 
 
 def check_pandas_output(root):
@@ -570,6 +620,7 @@ CHECKS = [
     ("facade: pre-warm cache serves covered subsets", check_cache_prewarm),
     ("facade: cache persists to parquet, reloads across sessions", check_cache_persistence),
     ("facade: from_cache cold-starts offline, zero store contact", check_from_cache_offline),
+    ("inventory: static model inventory matches ids and store schema", check_inventory),
     ("facade: output='pandas' at the return boundary", check_pandas_output),
     ("layers: wrap/unwrap round trip, describe()", check_layers_interop),
 ]
