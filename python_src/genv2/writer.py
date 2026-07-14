@@ -82,11 +82,27 @@ def membership_table(dates, slots, estu) -> pa.Table:
     })
 
 
-def freturn_table(dates, seq, vals, factor_ids) -> pa.Table:
+def freturn_table(dates, seq, vals, factor_ids, types) -> pa.Table:
+    """types: int8 array indexing PUB_TYPE_IDS (0=OFFICIAL, 1=T0_ESTIMATE)."""
     n = len(vals)
     return pa.table({
         "cob_date": pa.array(dates),
         "factor_id": _fcol(seq, factor_ids),
+        "value": pa.array(vals, type=pa.float64()),
+        "type": pa.DictionaryArray.from_arrays(
+            pa.array(types, type=pa.int8()), pa.array(PUB_TYPE_IDS)),
+        "version_id": pa.array(np.ones(n, np.int16)),
+    })
+
+
+PUB_TYPE_IDS = ["OFFICIAL", "T0_ESTIMATE"]
+
+
+def areturn_table(dates, slots, vals) -> pa.Table:
+    n = len(vals)
+    return pa.table({
+        "cob_date": pa.array(dates),
+        "asset_id": pa.array(slots + 1, type=pa.int32()),
         "value": pa.array(vals, type=pa.float64()),
         "version_id": pa.array(np.ones(n, np.int16)),
     })

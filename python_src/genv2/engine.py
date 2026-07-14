@@ -258,3 +258,39 @@ def emit_fmp(st: ModelState, static: ModelStatic, m: V2Model,
     a = np.tile(idx, k)
     v = round_sig(W.T.ravel())
     return f, a, v
+
+
+def emit_asset_returns(st: ModelState, static: ModelStatic, m: V2Model,
+                       cfg, live, sig_ann, t: int,
+                       la, lf, lv) -> tuple[np.ndarray, np.ndarray]:
+    """(slot_idx, value) per-asset total returns, vendor return convention.
+
+    Model-coherent: r_a = Σ_f L_af · fr_f + ε_a · σ_a/√252, built from the
+    same (rounded) loadings this date emits, the decimal factor returns,
+    and idio noise scaled by the day's specific risk. The 'aret' stream is
+    new and counter-keyed, so no existing series is perturbed. Variants
+    share the base's idio draw (same vendor, same asset)."""
+    fr_dec = static.vols / math.sqrt(BUSDAYS_PER_YEAR) * st.z
+    fac_part = np.zeros(sig_ann.shape[0])
+    np.add.at(fac_part, la, lv * fr_dec[lf])
+    eps = stream(cfg.global_seed, m.seed_id(True), "aret", t).normal(
+        0.0, 1.0, sig_ann.shape[0])
+    idx = np.flatnonzero(live & static.covered).astype(np.int32)
+    r = fac_part[idx] + eps[idx] * sig_ann[idx] / math.sqrt(BUSDAYS_PER_YEAR)
+    if m.return_convention == "daily_pct":
+        r = r * 100.0
+    return idx, round_sig(r)
+
+
+def emit_t0_estimates(m: V2Model, ff, fa, fw, ar_idx, ar_val,
+                      n_slots: int) -> np.ndarray:
+    """T0_ESTIMATE factor returns: Σ_a w_fa · r_a over the FMPs, computed
+    from the rounded as-stored weights and asset returns (vendor units) so
+    a consumer recomputing from the store recovers these numbers. Length
+    len(fmp_factor_seq), that order."""
+    r_full = np.zeros(n_slots)
+    r_full[ar_idx] = ar_val
+    k = len(m.fmp_factor_seq)
+    n = len(fa) // k
+    est = (fw.reshape(k, n) * r_full[fa[:n]][None, :]).sum(axis=1)
+    return round_sig(est)

@@ -31,7 +31,7 @@ def run_validation(cfg: V2Config) -> int:
         return con.execute(sql, list(p)).fetchall()
 
     for t in ("factor_loading", "specific_risk", "universe_membership",
-              "factor_return", "fmp"):
+              "factor_return", "fmp", "asset_return"):
         con.execute(f"CREATE VIEW {t} AS SELECT * FROM "
                     f"read_parquet('{out}/{t}/**/*.parquet', hive_partitioning=true)")
     for t in ("model_master", "factor_master", "asset_master"):
@@ -103,14 +103,48 @@ def run_validation(cfg: V2Config) -> int:
     ok = all(abs(lo - 1) < 1e-4 and abs(hi - 1) < 1e-4 for _, lo, hi in rows)
     check("fmp: unit gross per factor", ok, str([(r[0], round(r[1], 5)) for r in rows[:3]]))
 
-    # factor returns: one row per factor per date (sample year)
+    # factor returns: per model-date, n_factors OFFICIAL rows and one
+    # T0_ESTIMATE row per FMP factor (styles + market), via the type column
     y = int(mid_date[:4])
     bad = q("""
         SELECT count(*) FROM (
-          SELECT model_id, cob_date, count(*) c FROM factor_return
-          WHERE year = ? GROUP BY 1, 2) t
-        JOIN model_master mm USING (model_id) WHERE t.c <> mm.n_factors""", y)[0][0]
-    check("factor_return: n_factors rows per model-date", bad == 0, f"{bad} bad dates")
+          SELECT model_id, cob_date,
+                 count(*) FILTER (WHERE type = 'OFFICIAL') c_off,
+                 count(*) FILTER (WHERE type = 'T0_ESTIMATE') c_est
+          FROM factor_return WHERE year = ? GROUP BY 1, 2) t
+        JOIN model_master mm USING (model_id)
+        JOIN (SELECT model_id, count(*) k FROM factor_master
+              WHERE factor_type IN ('STYLE', 'MARKET') GROUP BY 1) fm
+          USING (model_id)
+        WHERE t.c_off <> mm.n_factors OR t.c_est <> fm.k""", y)[0][0]
+    check("factor_return: OFFICIAL n_factors + T0 per FMP factor, per model-date",
+          bad == 0, f"{bad} bad dates")
+
+    # asset_return: one row per covered asset per model-date
+    bad = q("""
+        SELECT count(*) FROM (
+          SELECT model_id, count(*) c FROM asset_return
+          WHERE cob_date = ? GROUP BY 1) a
+        JOIN (SELECT model_id, count(*) c FROM universe_membership
+              WHERE cob_date = ? GROUP BY 1) u
+        USING (model_id) WHERE a.c <> u.c""", mid_date, mid_date)[0][0]
+    check("asset_return: rows = coverage per model-date", bad == 0,
+          f"{bad} mismatched models")
+
+    # T0 parity: stored estimate == FMP weights × same-day asset returns
+    worst = q("""
+        SELECT max(abs(est.value - calc.v)
+                   / greatest(abs(est.value), 1e-9)) FROM
+          (SELECT model_id, factor_id, value FROM factor_return
+           WHERE cob_date = ? AND type = 'T0_ESTIMATE') est
+        JOIN
+          (SELECT f.model_id, f.factor_id, sum(f.weight * r.value) v
+           FROM fmp f
+           JOIN asset_return r USING (model_id, cob_date, asset_id)
+           WHERE f.cob_date = ? GROUP BY 1, 2) calc
+        USING (model_id, factor_id)""", mid_date, mid_date)[0][0]
+    check("t0 parity: estimate = Σ fmp_weight × asset_return",
+          worst is not None and worst < 1e-5, f"worst rel err {worst}")
 
     # restatement rate ~1%
     for m in cfg.models:

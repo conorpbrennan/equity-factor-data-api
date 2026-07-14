@@ -15,9 +15,10 @@ from .writer import write_any as write_parquet
 
 from . import writer as W
 from .engine import (ModelStatic, ModelState, advance, build_static,
-                     emit_covariance, emit_factor_returns, emit_fmp,
-                     emit_loadings, emit_membership, emit_specific_risk,
-                     fresh_state, load_checkpoint, save_checkpoint)
+                     emit_asset_returns, emit_covariance, emit_factor_returns,
+                     emit_fmp, emit_loadings, emit_membership,
+                     emit_specific_risk, emit_t0_estimates, fresh_state,
+                     load_checkpoint, save_checkpoint)
 from .fleet import V2Config, V2Model
 from .universe import MultiUniverse, build_multi_universe
 
@@ -98,8 +99,10 @@ class _Buf:
         self.c = ([], [])                  # dates_n, vals
         self.s = ([], [], [], [])          # dates, slots, vals, ver
         self.m = ([], [], [])              # dates, slots, estu
-        self.r = ([], [])                  # dates_n, vals
+        self.r = ([], [])                  # dates_n, vals (OFFICIAL stream)
         self.f = ([], [], [], [])          # dates, seq, slots, vals
+        self.ar = ([], [], [])             # dates, slots, vals
+        self.est = []                      # per-date T0 estimate vectors (k,)
 
     def add_loading(self, day, a, f, v, ver):
         n = len(v)
@@ -125,13 +128,29 @@ class _Buf:
                                            cat(self.s[2]), cat(self.s[3])),
             "universe_membership": W.membership_table(cat(self.m[0]), cat(self.m[1]),
                                                       cat(self.m[2])),
-            "factor_return": W.freturn_table(
-                np.repeat(np.asarray(self.r[0]), m.n_factors),
-                np.tile(np.arange(m.n_factors, dtype=np.int16), len(self.r[0])),
-                cat(self.r[1]), fids),
+            "factor_return": self._freturn(m, fids),
             "fmp": W.fmp_table(cat(self.f[0]), cat(self.f[1]), cat(self.f[2]),
                                cat(self.f[3]), fids),
+            "asset_return": W.areturn_table(cat(self.ar[0]), cat(self.ar[1]),
+                                            cat(self.ar[2])),
         }
+
+    def _freturn(self, m: V2Model, fids):
+        """Both publication streams: OFFICIAL rows (all factors) then
+        T0_ESTIMATE rows (FMP factors), discriminated by the type column."""
+        dates = np.asarray(self.r[0])
+        nd, nf = len(dates), m.n_factors
+        seqs_est = np.asarray(m.fmp_factor_seq, dtype=np.int16)
+        k = len(seqs_est)
+        return W.freturn_table(
+            np.concatenate([np.repeat(dates, nf), np.repeat(dates, k)]),
+            np.concatenate([np.tile(np.arange(nf, dtype=np.int16), nd),
+                            np.tile(seqs_est, nd)]),
+            np.concatenate([np.concatenate(self.r[1]),
+                            np.concatenate(self.est)]),
+            fids,
+            np.concatenate([np.zeros(nd * nf, np.int8),
+                            np.ones(nd * k, np.int8)]))
 
 
 def generate(cfg: V2Config, years: list[int] | None = None, quiet: bool = False,
@@ -198,6 +217,11 @@ def generate(cfg: V2Config, years: list[int] | None = None, quiet: bool = False,
                     ff, fa, fv = emit_fmp(state, static, m, live)
                     buf.f[0].append(np.repeat(day, len(fv))); buf.f[1].append(ff)
                     buf.f[2].append(fa); buf.f[3].append(fv)
+                    ai, av = emit_asset_returns(state, static, m, cfg, live,
+                                                sig, t, a, f, v)
+                    buf.ar[0].append(np.repeat(day, len(ai)))
+                    buf.ar[1].append(ai); buf.ar[2].append(av)
+                    buf.est.append(emit_t0_estimates(m, ff, fa, fv, ai, av, S))
 
                     # restatement injection (version_id = 2, published T+1..T+5)
                     g = stream(cfg.global_seed, m.model_id, "restate", t)

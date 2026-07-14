@@ -18,7 +18,7 @@ def main(argv=None) -> int:
     p_plan.add_argument("--tier", default="full")
     p_plan.add_argument("--mem-gb", type=float, required=True)
     p_plan.add_argument("--threads", type=int, required=True)
-    for name in ("generate", "validate", "transforms"):
+    for name in ("generate", "validate", "transforms", "returns"):
         p = sub.add_parser(name)
         p.add_argument("--tier", default="dev")  # any key of fleet.TIERS
         p.add_argument("--output", default=None, help="override output root")
@@ -33,6 +33,10 @@ def main(argv=None) -> int:
         if name == "transforms":
             p.add_argument("--strategy", choices=("a", "b", "both", "map"), default="both")
             p.add_argument("--out-root", default="data/v2")
+            p.add_argument("--models", default=None,
+                           help="comma-separated model_id subset (parallel lanes)")
+        if name == "returns":
+            p.add_argument("--quiet", action="store_true")
             p.add_argument("--models", default=None,
                            help="comma-separated model_id subset (parallel lanes)")
     args = ap.parse_args(argv)
@@ -74,6 +78,14 @@ def main(argv=None) -> int:
                 cfg, models=tuple(m for m in cfg.models if m.model_id in wanted))
         from .transforms import build
         build(cfg, cfg.output_dir, args.out_root, args.strategy)
+        return 0
+    if args.cmd == "returns":
+        if args.models:
+            wanted = args.models.split(",")
+            cfg = dataclasses.replace(
+                cfg, models=tuple(m for m in cfg.models if m.model_id in wanted))
+        from .returns import generate_returns
+        generate_returns(cfg, quiet=args.quiet)
         return 0
     from .validate import run_validation
     return run_validation(cfg)
