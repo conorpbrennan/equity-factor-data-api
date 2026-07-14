@@ -328,7 +328,7 @@ def check_facade_dates_and_wide(root):
     wide output pivots sparse long rows into one column per factor in
     factor_seq order — absent one-hots filled with 0.0, style cells matching
     the deterministic generator values exactly."""
-    fac = ModelFacade.load(MID, str(root))
+    fac = ModelFacade.load(MID, str(root), output="polars")
     by_str = fac.get_factor_loadings("2025-01-06")
     by_date = fac.get_factor_loadings(date(2025, 1, 6))
     assert by_str.equals(by_date)
@@ -349,7 +349,7 @@ def check_facade_identifiers(root):
     internal asset_ids via asset_xref — with the scheme pinned by
     sec_id_type=, or auto-detected when the ids are unambiguous — and an
     unknown id fails loudly instead of returning an empty frame."""
-    fac = ModelFacade.load(MID, str(root))
+    fac = ModelFacade.load(MID, str(root), output="polars")
     wide = fac.get_factor_loadings("latest", assets=["AX0000003", "AX0000005"],
                                    sec_id_type=SecurityIDType.AXIOMA)
     assert sorted(wide["asset_id"]) == [3, 5]
@@ -370,7 +370,7 @@ def check_facade_units(root):
     canonical units using this model's model_master conventions (29.0
     ann_vol_pct -> 0.29; 0.5 daily_pct -> 0.005; 4.0 ann_var_pct2 -> 4e-4)
     while the core hands back the raw stored numbers untouched."""
-    fac = ModelFacade.load(MID, str(root))
+    fac = ModelFacade.load(MID, str(root), output="polars")
     srisk = fac.get_specific_risk("latest", assets=[1])
     assert abs(srisk["value"][0] - 0.29) < 1e-12          # 29.0 ann_vol_pct
     raw = fac.core.specific_risk(DATES[-1], assets=[1])
@@ -389,7 +389,7 @@ def check_t0_estimates(root):
     estimates=True switches streams and bypasses the cache (freshness is the
     point); pub_type is validated; and a legacy store without the column
     still serves official but refuses estimates loudly."""
-    fac = ModelFacade.load(MID, str(root))
+    fac = ModelFacade.load(MID, str(root), output="polars")
     official = fac.get_factor_returns("2025-01-02", "2025-01-15")
     assert official.height == len(DATES) * len(FACTORS)       # one stream
     assert abs(official["value"][0] - 0.005) < 1e-12          # 0.5 daily_pct
@@ -425,7 +425,7 @@ def check_cache_prewarm(root):
     (subset assets, subset dates) is served from cache, and a request outside
     the warmed scope (asset 6) falls through to the store and still returns
     correct data."""
-    fac = ModelFacade.load(MID, str(root))
+    fac = ModelFacade.load(MID, str(root), output="polars")
     fac.get_factor_loadings("latest", assets=[1])              # cold: miss
     assert fac.cache.stats["misses"] == 1 and fac.cache.stats["hits"] == 0
     fac.warm([1, 2, 3])
@@ -453,7 +453,7 @@ def check_cache_persistence(root):
     a different model refuses the saved set."""
     os.environ["FACTOR_CACHE_DIR"] = str(Path(root) / "cachebase")
     try:
-        a = ModelFacade.load(MID, str(root))
+        a = ModelFacade.load(MID, str(root), output="polars")
         try:
             a.save_cache()                              # nothing warmed yet
             raise AssertionError("saved an empty working set")
@@ -467,7 +467,7 @@ def check_cache_persistence(root):
         assert (saved_to / "manifest.json").exists()
         assert (saved_to / "factor_loading.parquet").exists()
 
-        b = ModelFacade.load(MID, str(root))            # 'next session'
+        b = ModelFacade.load(MID, str(root), output="polars")            # 'next session'
         b.load_cache()                                  # newest date, no args
         covered = b.get_factor_loadings("2025-01-10", assets=[1, 2])
         assert b.cache.stats["hits"] == 1 and b.cache.stats["misses"] == 0
@@ -489,7 +489,7 @@ def check_cache_persistence(root):
             assert "TTL" in str(e)
         b.load_cache(max_age_days=None)                 # explicit opt-out
 
-        other = ModelFacade.load("BARRA_TEST1_L", str(root))
+        other = ModelFacade.load("BARRA_TEST1_L", str(root), output="polars")
         try:
             other.load_cache()                          # no set for its model
             raise AssertionError("found a set for a model never saved")
@@ -512,13 +512,13 @@ def check_from_cache_offline(root):
     request. Only a request outside coverage may fall through."""
     os.environ["FACTOR_CACHE_DIR"] = str(Path(root) / "offlinebase")
     try:
-        a = ModelFacade.load(MID, str(root))
+        a = ModelFacade.load(MID, str(root), output="polars")
         a.warm([1, 2, 3])
         saved = a.save_cache()
         for dim in ("model_master", "factor_master", "asset_xref"):
             assert (saved / "dims" / f"{dim}.parquet").exists(), dim
 
-        b = ModelFacade.from_cache(MID, str(root))      # fresh 'session'
+        b = ModelFacade.from_cache(MID, str(root), output="polars")      # fresh 'session'
         store = b.core.store
         assert store._con is None                        # never connected
         b.get_factor_loadings("latest", assets=[1, 2])
@@ -531,7 +531,7 @@ def check_from_cache_offline(root):
         # a machine with no store configured at all can still start hot
         prior = os.environ.pop("FACTOR_STORE_ROOT", None)
         try:
-            c = ModelFacade.from_cache(MID)
+            c = ModelFacade.from_cache(MID, output="polars")
             c.get_factor_returns(DATES[0], DATES[-1])
             assert c.cache.stats["hits"] == 1
         finally:
@@ -561,17 +561,18 @@ def check_inventory(root):
 
 
 def check_pandas_output(root):
-    """The output= option: invalid values rejected at construction; with
-    output='pandas' the conversion happens once at the return boundary —
-    meaning a helpful install hint when pandas is missing, and genuine
-    pd.DataFrames (units already canonical) when it's present. The default
-    facade keeps speaking polars either way."""
+    """The output boundary: the user layer speaks pandas BY DEFAULT (the
+    notebooks it serves lean on pandas — project decision 2026-07-14), with
+    output='polars' as the opt-in for polars-native work. Conversion happens
+    once at the return boundary — a helpful install hint when pandas is
+    missing, genuine pd.DataFrames (units already canonical) when present —
+    and invalid output values are rejected at construction."""
     try:
         ModelFacade.load(MID, str(root), output="arrow")
         raise AssertionError("bad output value accepted")
     except ValueError:
         pass
-    fac = ModelFacade.load(MID, str(root), output="pandas")
+    fac = ModelFacade.load(MID, str(root))              # pandas is the default
     try:
         import pandas as pd
     except ModuleNotFoundError:
@@ -588,8 +589,8 @@ def check_pandas_output(root):
     srisk = fac.get_specific_risk("latest", assets=[1])
     assert isinstance(srisk, pd.DataFrame)
     assert abs(srisk["value"].iloc[0] - 0.29) < 1e-12   # units survive
-    # default facade still speaks polars
-    assert isinstance(ModelFacade.load(MID, str(root))
+    # polars remains available as the explicit opt-in
+    assert isinstance(ModelFacade.load(MID, str(root), output="polars")
                       .get_factor_loadings("latest"), pl.DataFrame)
 
 
@@ -598,7 +599,7 @@ def check_layers_interop(root):
     the strict Model for core computations, ModelFacade(core) re-wraps it,
     and describe() surfaces the metadata a user needs to orient (styles,
     factor count, raw vendor conventions)."""
-    fac = ModelFacade.load(MID, str(root))
+    fac = ModelFacade.load(MID, str(root), output="polars")
     core = fac.core
     assert isinstance(core, Model)
     rewrapped = ModelFacade(core)
@@ -621,7 +622,7 @@ CHECKS = [
     ("facade: cache persists to parquet, reloads across sessions", check_cache_persistence),
     ("facade: from_cache cold-starts offline, zero store contact", check_from_cache_offline),
     ("inventory: static model inventory matches ids and store schema", check_inventory),
-    ("facade: output='pandas' at the return boundary", check_pandas_output),
+    ("facade: pandas by default, conversion at the return boundary", check_pandas_output),
     ("layers: wrap/unwrap round trip, describe()", check_layers_interop),
 ]
 

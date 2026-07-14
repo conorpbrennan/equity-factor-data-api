@@ -28,10 +28,11 @@ from .store import Store
 class ModelFacade:
 
     def __init__(self, model: Model, cache: UserCache | None = None,
-                 output: str = "polars"):
-        """output: dataframe library the user layer speaks — 'polars' or
-        'pandas'. Internals (core, cache) stay polars/Arrow either way;
-        conversion happens once at the return boundary."""
+                 output: str = "pandas"):
+        """output: dataframe library the user layer speaks — 'pandas' by
+        default (the notebooks this serves lean on pandas) or 'polars'.
+        Internals (core, cache) stay polars/Arrow either way; conversion
+        happens once at the return boundary."""
         if output not in ("polars", "pandas"):
             raise ValueError(f"output must be 'polars' or 'pandas', got {output!r}")
         self._model = model
@@ -41,7 +42,7 @@ class ModelFacade:
 
     @classmethod
     def load(cls, model_id: str, root: str | None = None,
-             output: str = "polars") -> "ModelFacade":
+             output: str = "pandas") -> "ModelFacade":
         """One line from model name to data access.
 
         Args:
@@ -49,8 +50,8 @@ class ModelFacade:
                 against the store's model_master.
             root: Store root (local path or ``s3://``). Defaults to
                 ``$FACTOR_STORE_ROOT``.
-            output: Dataframe library returned to the user — ``"polars"``
-                or ``"pandas"``.
+            output: Dataframe library returned to the user —
+                ``"pandas"`` (default) or ``"polars"``.
 
         Returns:
             A facade over a strict core ``Model``, with an empty cache.
@@ -425,7 +426,7 @@ class ModelFacade:
 
     @classmethod
     def from_cache(cls, model_id: str, root: str | None = None, *,
-                   path=None, as_of=None, output: str = "polars",
+                   path=None, as_of=None, output: str = "pandas",
                    max_age_days: float | None = 1.0) -> "ModelFacade":
         """Start a session entirely from a persisted working set.
 
@@ -445,7 +446,7 @@ class ModelFacade:
                 ``$FACTOR_STORE_ROOT``; only contacted on a cache miss.
             path: Exact saved-set directory (bypasses key resolution).
             as_of: Pin a specific key date; latest available otherwise.
-            output: ``"polars"`` or ``"pandas"``, as in ``load()``.
+            output: ``"pandas"`` (default) or ``"polars"``, as in ``load()``.
             max_age_days: TTL for the saved set; ``None`` disables.
 
         Raises:

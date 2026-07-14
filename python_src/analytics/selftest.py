@@ -167,7 +167,7 @@ def check_t0_estimation(root):
     est = estimate_factor_returns(core, DATES[-1])
     assert est["factor_id"].to_list() == ["MARKET_SENSITIVITY",
                                           "MT_MOMENTUM", "VALUE"]
-    stored = (ModelFacade.load(MID, str(root))
+    stored = (ModelFacade.load(MID, str(root), output="polars")
               .get_factor_returns(estimates=True,
                                   factors=est["factor_id"].to_list()))
     for f in est["factor_id"]:

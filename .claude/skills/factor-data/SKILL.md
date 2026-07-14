@@ -67,8 +67,10 @@ fac.get_covariance("latest")                       # canonical ann. decimal²
 
 Dates: `date`, `'YYYY-MM-DD'`, or `'latest'`. Facade output is canonical
 units (returns daily decimal, vol annualized decimal, money $mm);
-`fac.core` is the strict layer with raw vendor values. `output="pandas"`
-on `load()` if a pandas frame is wanted.
+`fac.core` is the strict layer with raw vendor values. The facade returns
+pandas frames by default; pass `output="polars"` to `load()`/`from_cache()`
+when you want polars (snippets in this skill that use `pl.` expressions on
+facade output should do so).
 
 ## Portfolios & analytics
 
@@ -144,5 +146,5 @@ than writing from scratch.
   `fac.load_cache()` adopts a set persisted by `python warm_cache.py`, and
   `ModelFacade.from_cache(model_id, root)` cold-starts from one with zero
   store contact (see Setup).
-- Verify claims with `python -m modelfacade selftest` (12 checks) and
-  `python -m analytics selftest` (6 checks).
+- Verify claims with `python -m modelfacade selftest` (14 checks) and
+  `python -m analytics selftest` (7 checks).

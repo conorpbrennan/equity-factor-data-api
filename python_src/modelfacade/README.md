@@ -30,8 +30,9 @@ explicit conversion between them.
   filter — never a join — and bypasses the cache. Stores predating the
   column serve official and refuse estimate requests loudly.
 - wide one-liners: `ModelFacade.load(mid).get_factor_loadings("latest")`
-- output in the user's dataframe library: `output="polars"` (default here) or
-  `output="pandas"` — internals stay polars/Arrow, conversion happens once at
+- output in the user's dataframe library: `output="pandas"` (the default —
+  the notebooks this serves are pandas-native) or `output="polars"` —
+  internals stay polars/Arrow, conversion happens once at
   the return boundary
 - discoverability: `list_models()`, `.factors`, `.styles`, `.describe()`
 - a user cache designed around **pre-warming an expected working set**
@@ -69,21 +70,19 @@ unwraps, and user-cache leniency cannot leak into core computations.
 
 ## Open questions
 
-- Which dataframe library does the user layer speak? The installed base of
-  risk notebooks and the existing core library are pandas-native (dates as
-  `pd.Timestamp`, "pandas user cache"), which argues for `output="pandas"` as
-  the deployed default; this repo defaults to polars to match its own stack.
-  The mechanism makes it a per-facade setting either way — the real decision
-  is only the default, plus whether pandas becomes a hard dependency.
+- ~~Which dataframe library does the user layer speak?~~ Resolved: pandas
+  by default — the installed base of risk notebooks is pandas-native and the
+  project bias is to change as little as possible. `output="polars"` stays a
+  per-facade opt-in; internals are polars/Arrow throughout either way.
 - Ownership: does the facade live with the core library team (facade and core
   must stay in sync) or with the team that owns application-to-portfolio use?
   Code location next to the core either way.
 - Units at which layer: core-raw / facade-canonical (as built) means two
   callers can hold different numbers for the same quantity; core-canonical
   would push vendor conventions down into ingest instead.
-- Cache invalidation: the pre-warm design sidesteps TTLs (a working set is
-  explicitly re-warmed), but restatements mean a warmed frame can go stale
-  within a day — is re-warm-on-publication enough?
+- ~~Cache invalidation~~ Resolved: persisted sets carry a 1-day TTL
+  (morning re-warm cadence) and `cache.clear()` handles known restatements;
+  users bypass the cache when a question needs fresher data.
 - Point-in-time: `version` is plumbed through the core layer; the facade
   doesn't yet expose an `as_known_on=` overlay (the store supports it — see
   the v2 report's PIT section).
