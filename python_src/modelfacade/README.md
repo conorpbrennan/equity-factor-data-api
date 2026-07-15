@@ -35,9 +35,11 @@ explicit conversion between them.
   internals stay polars/Arrow, conversion happens once at
   the return boundary
 - discoverability: `list_models()`, `.factors`, `.styles`, `.describe()`
-- a user cache designed around **pre-warming an expected working set**
-  (`warm(assets)` = YTD loadings + specific risk for a position list, plus all
-  factor returns), serving subset requests from it — not query-result caching
+- an **opt-in** user cache (off by default — pass `cache=UserCache()`; the
+  speed-vs-staleness trade-off is the caller's) designed around
+  **pre-warming an expected working set** (`warm(assets)` = YTD loadings +
+  specific risk for a position list, plus all factor returns), serving
+  subset requests from it — not query-result caching
 - working-set **persistence**: `save_cache()` / `load_cache()` write the
   warmed frames as parquet + a coverage manifest, keyed by
   (as-of date, model_id) under `<temp>/usercache/<as_of>/<model_id>/`

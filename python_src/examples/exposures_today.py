@@ -23,7 +23,7 @@ def main() -> None:
     positions = {"AX0000001": 10.0, "AX0000002": 20.0, "AX0000003": -5.0}
 
     # resolve vendor ids to internal asset_ids via the xref dimension
-    xref = fac.core.store.dim("asset_xref")
+    xref = fac.core.source.dim("asset_xref")
     id_map = dict(xref.filter(
         pl.col("vendor_asset_id").is_in(list(positions))
     ).select("vendor_asset_id", "asset_id").iter_rows())

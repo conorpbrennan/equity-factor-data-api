@@ -142,9 +142,11 @@ than writing from scratch.
 - `Portfolio` and the core layer take `datetime.date` only; the facade also
   takes strings. Never pass datetimes to `Portfolio.from_holdings`.
 - PnL decomposition holds positions constant over the window (buy-and-hold).
-- Cache: `fac.warm(assets)` then repeated covered queries are memory-served;
+- Cache is OFF by default: opt in with
+  `ModelFacade.load(..., cache=UserCache())` (import from `modelfacade`),
+  then `fac.warm(assets)` makes repeated covered queries memory-served;
   `fac.load_cache()` adopts a set persisted by `python warm_cache.py`, and
   `ModelFacade.from_cache(model_id, root)` cold-starts from one with zero
-  store contact (see Setup).
-- Verify claims with `python -m modelfacade selftest` (14 checks) and
+  store contact (see Setup). `warm()` without an opted-in cache raises.
+- Verify claims with `python -m modelfacade selftest` (15 checks) and
   `python -m analytics selftest` (7 checks).

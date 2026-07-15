@@ -2,7 +2,8 @@
 
 Adds what end users need and the core deliberately refuses: string dates and
 'latest', vendor security ids, canonical units (conventions.units), wide
-dataframes, discoverability, and the pre-warmable UserCache. Wrap and unwrap
+dataframes, discoverability, and an opt-in pre-warmable UserCache (off by
+default — the staleness trade-off is the caller's). Wrap and unwrap
 freely — ModelFacade(model) / facade.core — the layers stay separate.
 """
 
@@ -20,7 +21,7 @@ from conventions import (ASSET_ID, COB_DATE, FACTOR_ID, SPECIFIC_RISK,
                          T0_ESTIMATE, VALUE, scale_to_canonical,
                          sec_id_type_str)
 
-from .cache import Coverage, UserCache
+from .cache import Coverage, NoCache, UserCache
 from .core import Model
 from .store import Store
 
@@ -32,17 +33,22 @@ class ModelFacade:
         """output: dataframe library the user layer speaks — 'pandas' by
         default (the notebooks this serves lean on pandas) or 'polars'.
         Internals (core, cache) stay polars/Arrow either way; conversion
-        happens once at the return boundary."""
+        happens once at the return boundary.
+
+        cache: caching is OFF by default — every request goes to the store.
+        Pass cache=UserCache() to opt in; the speed-vs-staleness trade-off
+        is the caller's, never a default."""
         if output not in ("polars", "pandas"):
             raise ValueError(f"output must be 'polars' or 'pandas', got {output!r}")
         self._model = model
-        self.cache = cache or UserCache()
+        self.cache = cache if cache is not None else NoCache()
         self.output = output
         self._frozen_latest: date | None = None   # set by from_cache only
 
     @classmethod
     def load(cls, model_id: str, root: str | None = None,
-             output: str = "pandas") -> "ModelFacade":
+             output: str = "pandas",
+             cache: UserCache | None = None) -> "ModelFacade":
         """One line from model name to data access.
 
         Args:
@@ -52,14 +58,18 @@ class ModelFacade:
                 ``$FACTOR_STORE_ROOT``.
             output: Dataframe library returned to the user —
                 ``"pandas"`` (default) or ``"polars"``.
+            cache: Off by default. Pass ``UserCache()`` to opt in to the
+                pre-warmable working-set cache.
 
         Returns:
-            A facade over a strict core ``Model``, with an empty cache.
+            A facade over a strict core ``Model``; no caching unless
+            opted in.
 
         Raises:
             ValueError: Unknown model, bad ``output``, or no store root.
         """
-        return cls(Model(Store.open(root), model_id), output=output)
+        return cls(Model(Store.open(root), model_id), cache=cache,
+                   output=output)
 
     def _out(self, frame: pl.DataFrame):
         """Convert at the return boundary, per the facade's output setting."""
@@ -127,7 +137,7 @@ class ModelFacade:
         assets = list(assets)
         if all(isinstance(a, int) for a in assets):
             return assets
-        xref = self._model.store.dim("asset_xref")
+        xref = self._model.source.dim("asset_xref")
         if sec_id_type is not None:
             xref = xref.filter(pl.col("vendor") == sec_id_type_str(sec_id_type))
         wanted = [str(a) for a in assets]
@@ -278,7 +288,15 @@ class ModelFacade:
 
         Returns:
             Cache stats: ``{'hits', 'misses', 'rows': {dataset: n}}``.
+
+        Raises:
+            ValueError: No cache opted in — warm() needs somewhere to
+                put the working set.
         """
+        if isinstance(self.cache, NoCache):
+            raise ValueError(
+                "caching is off by default — ModelFacade.load(..., "
+                "cache=UserCache()) to opt in before warm()")
         cob = self._as_date(as_of)
         ids = self._resolve_assets(assets, sec_id_type)
         start = date(cob.year, 1, 1)
@@ -287,14 +305,8 @@ class ModelFacade:
         self.cache.put("factor_loading",
                        m.loading_history(start, cob, assets=ids),
                        Coverage(start, cob, scope))
-        srisk = m.store.sql(
-            f"SELECT * FROM read_parquet("
-            f"'{m.store.fact_glob('specific_risk', m.model_id)}', "
-            f"hive_partitioning=true) "
-            f"WHERE year = {cob.year} "
-            f"AND {COB_DATE} BETWEEN DATE '{start}' AND DATE '{cob}' "
-            f"AND {ASSET_ID} IN ({', '.join(map(str, ids))}) "
-            f"AND version_id = 1").drop("year", "model_id")
+        srisk = m.source.read_fact("specific_risk", m.model_id,
+                                   start=start, end=cob, assets=ids)
         self.cache.put("specific_risk", srisk, Coverage(start, cob, scope))
         self.cache.put("factor_return",
                        m.factor_returns(start, cob),
@@ -350,7 +362,7 @@ class ModelFacade:
         dims = out / "dims"
         dims.mkdir(exist_ok=True)
         for name in ("model_master", "factor_master", "asset_xref"):
-            self._model.store.dim(name).write_parquet(dims / f"{name}.parquet")
+            self._model.source.dim(name).write_parquet(dims / f"{name}.parquet")
         return out
 
     def load_cache(self, path=None, as_of=None, *,

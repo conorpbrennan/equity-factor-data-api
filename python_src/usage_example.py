@@ -98,7 +98,7 @@ def main() -> None:
         is loaded, what units the vendor publishes in, whether it is a
         custom variant of a base model.""")
 
-    from modelfacade import ModelFacade, list_models
+    from modelfacade import ModelFacade, UserCache, list_models
     print(list_models(root))
 
     fac = ModelFacade.load(model_id, root)   # one line to data access
@@ -154,7 +154,7 @@ def main() -> None:
 
     # demo ids looked up from assets actually covered at the latest date,
     # so the tour holds on any store, not just the micro fixture
-    xref = fac.core.store.dim("asset_xref")
+    xref = fac.core.source.dim("asset_xref")
     a1, a2 = wide[ASSET_ID][0], wide[ASSET_ID][1]
     ax_id, b_id = [
         xref.filter((pl.col("vendor") == vendor)
@@ -204,8 +204,10 @@ def main() -> None:
         print(f"get_factor_returns(estimates=True) -> refused: {e}")
 
     # ------------------------------------------------------------------ 7
-    section(7, "the pre-warm cache: load the working set once", """
-        Not query-result caching: most questions hit a predictable working
+    section(7, "the opt-in pre-warm cache: load the working set once", """
+        Caching is OFF by default — pass cache=UserCache() to opt in; the
+        speed-vs-staleness trade-off is always the caller's. Not
+        query-result caching: most questions hit a predictable working
         set — YTD data for the assets you hold, in the model you care about.
         warm() loads that set once; any request covered by it (subset dates,
         subset assets) is served from memory, anything outside falls through
@@ -213,7 +215,8 @@ def main() -> None:
         keyed by (as-of date, model): the scheduled job (warm_cache.py) is
         the producer, and the fresh session below consumes what it saved.""")
 
-    session = ModelFacade.load(model_id, root)   # a fresh user session
+    session = ModelFacade.load(model_id, root,
+                               cache=UserCache())   # opted-in user session
     positions = [1, 2, 3]                        # 'the assets you hold'
     stats = session.warm(positions)              # YTD loadings+srisk+returns
     print("after warm(positions):", stats)

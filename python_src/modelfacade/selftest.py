@@ -34,6 +34,7 @@ import pyarrow.parquet as pq
 from conventions import SecurityIDType, scale_to_canonical, snake_case
 from conventions.signatures import DISCOURAGED
 
+from .cache import UserCache
 from .core import Model
 from .facade import ModelFacade
 from .store import Store, list_models
@@ -322,6 +323,102 @@ def check_core_loadings(root):
     assert (lo, hi) == (DATES[0], DATES[-1])
 
 
+def check_custom_datasource(_root):
+    """Dependency inversion: the core runs against any DataSource — here a
+    handful of in-memory polars frames built by hand, instantiated outside
+    the package and passed into Model. No Store, no SQL, no files. This is
+    the shape a curated model store arrives in: a second implementation of
+    the same four-method protocol, with the core unchanged."""
+    from .datasource import DataSource
+
+    d0, d1 = date(2025, 3, 3), date(2025, 3, 4)
+    dims = {
+        "model_master": pl.DataFrame({
+            "model_id": ["MEM1"], "vendor": ["handmade"],
+            "cov_scaling": ["daily_var"],
+            "specific_risk_convention": ["daily_vol"],
+            "return_convention": ["daily_dec"],
+        }),
+        "factor_master": pl.DataFrame({
+            "model_id": ["MEM1", "MEM1"],
+            "factor_id": ["VALUE", "MARKET"],
+            "factor_seq": [0, 1],
+            "factor_type": ["STYLE", "MARKET"],
+        }),
+    }
+    facts = {
+        "factor_loading": pl.DataFrame({
+            "cob_date": [d0, d0, d1, d1], "asset_id": [1, 2, 1, 2],
+            "factor_id": ["VALUE"] * 4, "value": [0.11, 0.22, 0.33, 0.44],
+            "version_id": [1] * 4,
+        }),
+        # no 'type' column: a source from before the estimate stream
+        "factor_return": pl.DataFrame({
+            "cob_date": [d0, d1], "factor_id": ["VALUE"] * 2,
+            "value": [0.001, 0.002], "version_id": [1] * 2,
+        }),
+    }
+
+    class InMemorySource:
+        """The whole implementation — filters over plain frames."""
+
+        def dim(self, name):
+            return dims[name]
+
+        def read_fact(self, fact, model_id, *, start, end, assets=None,
+                      factors=None, version=1, pub_type=None):
+            f = facts[fact].filter(
+                pl.col("cob_date").is_between(start, end)
+                & (pl.col("version_id") == version))
+            if assets is not None:
+                f = f.filter(pl.col("asset_id").is_in([int(a) for a in assets]))
+            if factors is not None:
+                f = f.filter(pl.col("factor_id").is_in(list(factors)))
+            if pub_type is not None:
+                f = f.filter(pl.col("type") == pub_type)
+            return f
+
+        def has_column(self, fact, model_id, col):
+            return col in facts[fact].columns
+
+        def date_bounds(self, model_id):
+            return d0, d1
+
+    source = InMemorySource()
+    assert isinstance(source, DataSource)      # structural, no inheritance
+
+    model = Model(source, "MEM1")              # the core, fed from outside
+    assert model.factors == ["VALUE", "MARKET"]
+    assert model.conventions["return_convention"] == "daily_dec"
+    assert model.dates() == (d0, d1)
+    assert model.factor_loadings(d1, assets=[1])["value"].to_list() == [0.33]
+
+    # core policy holds over a foreign source: strictness and validation...
+    try:
+        model.factor_loadings("2025-03-04")
+        raise AssertionError("core accepted a string date")
+    except TypeError:
+        pass
+    try:
+        model.factor_loadings(d1, factors=["NOT_A_FACTOR"])
+        raise AssertionError("core accepted an unknown factor")
+    except ValueError:
+        pass
+    # ...and the estimate-stream contract: no type column means OFFICIAL
+    # serves and estimate requests refuse, same rule as a legacy store
+    assert model.factor_returns(d0, d1)["value"].to_list() == [0.001, 0.002]
+    try:
+        model.factor_returns(d0, d1, pub_type="T0_ESTIMATE")
+        raise AssertionError("estimates served from a source with no stream")
+    except ValueError:
+        pass
+
+    # the facade wraps it untouched: leniency + pivot over any source
+    fac = ModelFacade(model, output="polars")
+    wide = fac.get_factor_loadings("2025-03-04", assets=[1])
+    assert wide["VALUE"].to_list() == [0.33]
+
+
 def check_facade_dates_and_wide(root):
     """Facade leniency, date edition: 'YYYY-MM-DD' strings resolve to the same
     frame as datetime.date, 'latest' resolves to the store's last COB, and
@@ -389,7 +486,8 @@ def check_t0_estimates(root):
     estimates=True switches streams and bypasses the cache (freshness is the
     point); pub_type is validated; and a legacy store without the column
     still serves official but refuses estimates loudly."""
-    fac = ModelFacade.load(MID, str(root), output="polars")
+    fac = ModelFacade.load(MID, str(root), output="polars",
+                           cache=UserCache())
     official = fac.get_factor_returns("2025-01-02", "2025-01-15")
     assert official.height == len(DATES) * len(FACTORS)       # one stream
     assert abs(official["value"][0] - 0.005) < 1e-12          # 0.5 daily_pct
@@ -419,13 +517,27 @@ def check_t0_estimates(root):
 
 
 def check_cache_prewarm(root):
-    """The pre-warm working-set design: before warm() every request is a
-    miss; warm([1,2,3]) loads YTD loadings + specific risk for those assets
-    plus all factor returns; afterwards any request *covered* by that set
-    (subset assets, subset dates) is served from cache, and a request outside
-    the warmed scope (asset 6) falls through to the store and still returns
+    """The opt-in pre-warm working-set design. Caching is OFF by default —
+    a facade built without cache= never retains anything and warm() refuses
+    (project decision, 2026-07-15: the staleness trade-off is the caller's).
+    With cache=UserCache(): before warm() every request is a miss;
+    warm([1,2,3]) loads YTD loadings + specific risk for those assets plus
+    all factor returns; afterwards any request *covered* by that set (subset
+    assets, subset dates) is served from cache, and a request outside the
+    warmed scope (asset 6) falls through to the store and still returns
     correct data."""
-    fac = ModelFacade.load(MID, str(root), output="polars")
+    off = ModelFacade.load(MID, str(root), output="polars")   # no cache=
+    off.get_factor_loadings("latest", assets=[1])
+    off.get_factor_loadings("latest", assets=[1])             # twice
+    assert off.cache.stats == {"hits": 0, "misses": 0, "rows": {}}
+    try:
+        off.warm([1, 2, 3])
+        raise AssertionError("warm() succeeded without an opted-in cache")
+    except ValueError as e:
+        assert "off by default" in str(e)
+
+    fac = ModelFacade.load(MID, str(root), output="polars",
+                           cache=UserCache())
     fac.get_factor_loadings("latest", assets=[1])              # cold: miss
     assert fac.cache.stats["misses"] == 1 and fac.cache.stats["hits"] == 0
     fac.warm([1, 2, 3])
@@ -453,7 +565,8 @@ def check_cache_persistence(root):
     a different model refuses the saved set."""
     os.environ["FACTOR_CACHE_DIR"] = str(Path(root) / "cachebase")
     try:
-        a = ModelFacade.load(MID, str(root), output="polars")
+        a = ModelFacade.load(MID, str(root), output="polars",
+                             cache=UserCache())
         try:
             a.save_cache()                              # nothing warmed yet
             raise AssertionError("saved an empty working set")
@@ -512,14 +625,15 @@ def check_from_cache_offline(root):
     request. Only a request outside coverage may fall through."""
     os.environ["FACTOR_CACHE_DIR"] = str(Path(root) / "offlinebase")
     try:
-        a = ModelFacade.load(MID, str(root), output="polars")
+        a = ModelFacade.load(MID, str(root), output="polars",
+                             cache=UserCache())
         a.warm([1, 2, 3])
         saved = a.save_cache()
         for dim in ("model_master", "factor_master", "asset_xref"):
             assert (saved / "dims" / f"{dim}.parquet").exists(), dim
 
         b = ModelFacade.from_cache(MID, str(root), output="polars")      # fresh 'session'
-        store = b.core.store
+        store = b.core.source
         assert store._con is None                        # never connected
         b.get_factor_loadings("latest", assets=[1, 2])
         b.get_specific_risk("latest", assets=["AX0000001"])   # xref offline
@@ -614,11 +728,12 @@ CHECKS = [
     ("store: list_models sees the fleet", check_list_models),
     ("core: rejects string/datetime dates, unknown models/factors", check_core_strictness),
     ("core: sparse long loadings, raw conventions, date range", check_core_loadings),
+    ("core: any DataSource — in-memory source built outside, passed in", check_custom_datasource),
     ("facade: string dates + 'latest', wide pivot with 0.0 fill", check_facade_dates_and_wide),
     ("facade: vendor ids via asset_xref (explicit + detected)", check_facade_identifiers),
     ("facade: canonical units (srisk, returns, covariance)", check_facade_units),
     ("facade: T0 estimate stream via the type column", check_t0_estimates),
-    ("facade: pre-warm cache serves covered subsets", check_cache_prewarm),
+    ("facade: cache off by default; opt-in pre-warm serves covered subsets", check_cache_prewarm),
     ("facade: cache persists to parquet, reloads across sessions", check_cache_persistence),
     ("facade: from_cache cold-starts offline, zero store contact", check_from_cache_offline),
     ("inventory: static model inventory matches ids and store schema", check_inventory),

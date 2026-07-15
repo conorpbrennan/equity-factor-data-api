@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import date
+from typing import Sequence
 
 import duckdb
 import polars as pl
 
-from conventions import MODEL_ID
+from conventions import (ASSET_ID, COB_DATE, FACTOR_ID, MODEL_ID, TYPE,
+                         VERSION_ID)
 
 # the project's S3 store — what every CLI's --aws flag resolves to, defined
 # once so the bucket name never gets re-typed
@@ -35,6 +38,8 @@ class Store:
     _dims: dict[str, pl.DataFrame] = field(default_factory=dict, repr=False)
     _engine: str | None = field(default=None, repr=False)
     _compute_checked: bool = field(default=False, repr=False)
+    _cols: dict[tuple[str, str, str], bool] = field(default_factory=dict,
+                                                    repr=False)
 
     def __post_init__(self) -> None:
         self.root = self.root.rstrip("/")
@@ -156,6 +161,72 @@ class Store:
                 "query engine error "
                 f"{e.code}: {e.read().decode(errors='replace')[:2000]}") from None
         return pa.ipc.open_stream(body).read_all()
+
+    # ------------------------------------------- DataSource protocol reads
+    # Query composition lives here: hive pruning, WHERE assembly, layout
+    # columns. Callers (core.Model) ask in dates/assets/factors and never
+    # see SQL or partition artifacts.
+    @staticmethod
+    def _in(col: str, values: Sequence) -> str:
+        items = ", ".join(f"'{v}'" if isinstance(v, str) else str(v)
+                          for v in values)
+        return f"AND {col} IN ({items}) " if values else ""
+
+    def read_fact(self, fact: str, model_id: str, *,
+                  start: date, end: date,
+                  assets: Sequence[int] | None = None,
+                  factors: Sequence[str] | None = None,
+                  version: int = 1,
+                  pub_type: str | None = None) -> pl.DataFrame:
+        """Rows of one fact for one model over [start, end], filtered.
+
+        Single-date reads are start == end; DuckDB prunes the year
+        partitions from the BETWEEN identically to an equality filter.
+        """
+        where = (f"year BETWEEN {start.year} AND {end.year} "
+                 f"AND {COB_DATE} BETWEEN DATE '{start}' AND DATE '{end}' "
+                 f"AND {VERSION_ID} = {version} ")
+        if assets is not None:
+            where += self._in(ASSET_ID, [int(a) for a in assets])
+        if factors is not None:
+            where += self._in(FACTOR_ID, list(factors))
+        if pub_type is not None:
+            where += f"AND {TYPE} = '{pub_type}' "
+        glob = self.fact_glob(fact, model_id)
+        return self.sql(
+            f"SELECT * FROM read_parquet('{glob}', hive_partitioning=true) "
+            f"WHERE {where}").drop("year", MODEL_ID)
+
+    def has_column(self, fact: str, model_id: str, col: str) -> bool:
+        """Schema probe (cached): does this fact table carry the column?"""
+        key = (fact, model_id, col)
+        if key not in self._cols:
+            glob = self.fact_glob(fact, model_id)
+            described = self.sql(
+                f"DESCRIBE SELECT * FROM read_parquet('{glob}')")
+            self._cols[key] = col in described["column_name"].to_list()
+        return self._cols[key]
+
+    def date_bounds(self, model_id: str) -> tuple[date, date]:
+        """First and last COB date a model has data for.
+
+        Pruned to the first and last year hive partitions: the years come
+        from the file listing alone (no parquet footers), so a remote store
+        answers from two partition scans instead of a full-glob footer
+        sweep — the difference between ~1s and ~50s over the internet.
+        """
+        glob = self.fact_glob("specific_risk", model_id)
+        listing = self.sql(f"SELECT file FROM glob('{glob}')")
+        years = (listing["file"].str.extract(r"year=(\d+)", 1)
+                 .cast(pl.Int32).drop_nulls())
+        if years.is_empty():
+            raise ValueError(f"{model_id}: no dated specific_risk "
+                             f"files under {glob}")
+        row = self.sql(
+            f"SELECT min({COB_DATE}) lo, max({COB_DATE}) hi "
+            f"FROM read_parquet('{glob}', hive_partitioning=true) "
+            f"WHERE year IN ({years.min()}, {years.max()})").to_dicts()[0]
+        return row["lo"], row["hi"]
 
     # ------------------------------------------------------------ dimensions
     def dim(self, name: str) -> pl.DataFrame:

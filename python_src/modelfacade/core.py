@@ -1,9 +1,14 @@
 """Strict core Model: the systems-facing layer.
 
 Contract: datetime.date only, internal integer asset ids only, factor ids
-validated against factor_master, values returned exactly as the store holds
+validated against factor_master, values returned exactly as the source holds
 them (raw vendor units — conversion is a user-layer convenience). Everything
 either returns a number you can rely on or raises; nothing coerces.
+
+Data access goes through the DataSource protocol (datasource.py): the core
+owns the contract but no implementation — it composes no SQL and knows no
+storage layout. Store satisfies the protocol today; a curated model store
+can replace it without the core changing.
 """
 
 from __future__ import annotations
@@ -14,10 +19,9 @@ from typing import Sequence
 import polars as pl
 
 from conventions import (ASSET_ID, COB_DATE, FACTOR_ID, FACTOR_SEQ,
-                         FACTOR_TYPE, MODEL_ID, OFFICIAL, PUB_TYPES, TYPE,
-                         VERSION_ID)
+                         FACTOR_TYPE, MODEL_ID, OFFICIAL, PUB_TYPES, TYPE)
 
-from .store import Store
+from .datasource import DataSource
 
 
 def _require_date(value, name: str) -> date:
@@ -30,21 +34,20 @@ def _require_date(value, name: str) -> date:
 
 
 class Model:
-    """Handle on one model in one store; dimension-backed, fail-fast."""
+    """Handle on one model in one data source; dimension-backed, fail-fast."""
 
-    def __init__(self, store: Store, model_id: str):
-        master = store.dim("model_master")
+    def __init__(self, source: DataSource, model_id: str):
+        master = source.dim("model_master")
         row = master.filter(pl.col(MODEL_ID) == model_id)
         if row.is_empty():
             known = master[MODEL_ID].to_list()
             raise ValueError(f"unknown model {model_id!r}; store has {known}")
-        self.store = store
+        self.source = source
         self.model_id = model_id
         self.meta = row.to_dicts()[0]
-        self._factors = (store.dim("factor_master")
+        self._factors = (source.dim("factor_master")
                          .filter(pl.col(MODEL_ID) == model_id)
                          .sort(FACTOR_SEQ))
-        self._cols: dict[tuple[str, str], bool] = {}   # (fact, col) -> exists
 
     # ------------------------------------------------------------- metadata
     @property
@@ -70,18 +73,6 @@ class Model:
         return list(factors)
 
     # ----------------------------------------------------------------- facts
-    def _fact(self, fact: str, where: str) -> pl.DataFrame:
-        glob = self.store.fact_glob(fact, self.model_id)
-        return self.store.sql(
-            f"SELECT * FROM read_parquet('{glob}', hive_partitioning=true) "
-            f"WHERE {where}")
-
-    @staticmethod
-    def _in(col: str, values: Sequence) -> str:
-        items = ", ".join(f"'{v}'" if isinstance(v, str) else str(v)
-                          for v in values)
-        return f"AND {col} IN ({items}) " if values else ""
-
     def factor_loadings(self, as_of: date, *,
                         assets: Sequence[int] | None = None,
                         factors: Sequence[str] | None = None,
@@ -104,13 +95,9 @@ class Model:
         """
         _require_date(as_of, "as_of")
         factors = self._check_factors(factors)
-        where = (f"year = {as_of.year} AND {COB_DATE} = DATE '{as_of}' "
-                 f"AND {VERSION_ID} = {version} ")
-        if assets is not None:
-            where += self._in(ASSET_ID, list(assets))
-        if factors is not None:
-            where += self._in(FACTOR_ID, factors)
-        return self._fact("factor_loading", where).drop("year", MODEL_ID)
+        return self.source.read_fact(
+            "factor_loading", self.model_id, start=as_of, end=as_of,
+            assets=assets, factors=factors, version=version)
 
     def loading_history(self, start: date, end: date, *,
                         assets: Sequence[int],
@@ -118,14 +105,10 @@ class Model:
                         version: int = 1) -> pl.DataFrame:
         _require_date(start, "start"), _require_date(end, "end")
         factors = self._check_factors(factors)
-        where = (f"year BETWEEN {start.year} AND {end.year} "
-                 f"AND {COB_DATE} BETWEEN DATE '{start}' AND DATE '{end}' "
-                 f"AND {VERSION_ID} = {version} "
-                 + self._in(ASSET_ID, list(assets)))
-        if factors is not None:
-            where += self._in(FACTOR_ID, factors)
-        return (self._fact("factor_loading", where)
-                .drop("year", MODEL_ID).sort(ASSET_ID, COB_DATE))
+        return (self.source.read_fact(
+                    "factor_loading", self.model_id, start=start, end=end,
+                    assets=assets, factors=factors, version=version)
+                .sort(ASSET_ID, COB_DATE))
 
     def asset_returns(self, start: date, end: date, *,
                       assets: Sequence[int] | None = None,
@@ -135,33 +118,18 @@ class Model:
         FMP weights × asset returns. Raises like every core read; a store
         without the asset_return dataset simply has no rows to serve."""
         _require_date(start, "start"), _require_date(end, "end")
-        where = (f"year BETWEEN {start.year} AND {end.year} "
-                 f"AND {COB_DATE} BETWEEN DATE '{start}' AND DATE '{end}' "
-                 f"AND {VERSION_ID} = {version} ")
-        if assets is not None:
-            where += self._in(ASSET_ID, [int(a) for a in assets])
-        return (self._fact("asset_return", where)
-                .drop("year", MODEL_ID).sort(ASSET_ID, COB_DATE))
+        return (self.source.read_fact(
+                    "asset_return", self.model_id, start=start, end=end,
+                    assets=assets, version=version)
+                .sort(ASSET_ID, COB_DATE))
 
     def specific_risk(self, as_of: date, *,
                       assets: Sequence[int] | None = None,
                       version: int = 1) -> pl.DataFrame:
         _require_date(as_of, "as_of")
-        where = (f"year = {as_of.year} AND {COB_DATE} = DATE '{as_of}' "
-                 f"AND {VERSION_ID} = {version} ")
-        if assets is not None:
-            where += self._in(ASSET_ID, list(assets))
-        return self._fact("specific_risk", where).drop("year", MODEL_ID)
-
-    def _has_column(self, fact: str, col: str) -> bool:
-        """Schema probe (cached): does this fact table carry the column?"""
-        key = (fact, col)
-        if key not in self._cols:
-            glob = self.store.fact_glob(fact, self.model_id)
-            described = self.store.sql(
-                f"DESCRIBE SELECT * FROM read_parquet('{glob}')")
-            self._cols[key] = col in described["column_name"].to_list()
-        return self._cols[key]
+        return self.source.read_fact(
+            "specific_risk", self.model_id, start=as_of, end=as_of,
+            assets=assets, version=version)
 
     def factor_returns(self, start: date, end: date, *,
                        factors: Sequence[str] | None = None,
@@ -189,55 +157,33 @@ class Model:
             raise ValueError(f"pub_type must be one of {PUB_TYPES}, "
                              f"got {pub_type!r}")
         factors = self._check_factors(factors)
-        where = (f"year BETWEEN {start.year} AND {end.year} "
-                 f"AND {COB_DATE} BETWEEN DATE '{start}' AND DATE '{end}' "
-                 f"AND {VERSION_ID} = {version} ")
-        if self._has_column("factor_return", TYPE):
-            where += f"AND {TYPE} = '{pub_type}' "
-        elif pub_type != OFFICIAL:
-            raise ValueError(
-                f"{self.model_id}: factor_return has no {TYPE!r} column — "
-                "this store carries no estimate stream")
-        if factors is not None:
-            where += self._in(FACTOR_ID, factors)
-        return (self._fact("factor_return", where)
-                .drop("year", MODEL_ID).sort(FACTOR_ID, COB_DATE))
+        stream: str | None = pub_type
+        if not self.source.has_column("factor_return", self.model_id, TYPE):
+            if pub_type != OFFICIAL:
+                raise ValueError(
+                    f"{self.model_id}: factor_return has no {TYPE!r} column — "
+                    "this store carries no estimate stream")
+            stream = None                      # pre-type store: no filter
+        return (self.source.read_fact(
+                    "factor_return", self.model_id, start=start, end=end,
+                    factors=factors, version=version, pub_type=stream)
+                .sort(FACTOR_ID, COB_DATE))
 
     def covariance(self, as_of: date, *, version: int = 1) -> pl.DataFrame:
         _require_date(as_of, "as_of")
-        return self._fact(
-            "factor_covariance",
-            f"year = {as_of.year} AND {COB_DATE} = DATE '{as_of}' "
-            f"AND {VERSION_ID} = {version} ").drop("year", MODEL_ID)
+        return self.source.read_fact(
+            "factor_covariance", self.model_id, start=as_of, end=as_of,
+            version=version)
 
     def fmp_weights(self, as_of: date, *,
                     factors: Sequence[str] | None = None,
                     version: int = 1) -> pl.DataFrame:
         _require_date(as_of, "as_of")
         factors = self._check_factors(factors)
-        where = (f"year = {as_of.year} AND {COB_DATE} = DATE '{as_of}' "
-                 f"AND {VERSION_ID} = {version} ")
-        if factors is not None:
-            where += self._in(FACTOR_ID, factors)
-        return self._fact("fmp", where).drop("year", MODEL_ID)
+        return self.source.read_fact(
+            "fmp", self.model_id, start=as_of, end=as_of,
+            factors=factors, version=version)
 
     def dates(self) -> tuple[date, date]:
-        """First and last COB date this model has data for.
-
-        Pruned to the first and last year hive partitions: the years come
-        from the file listing alone (no parquet footers), so a remote store
-        answers from two partition scans instead of a full-glob footer
-        sweep — the difference between ~1s and ~50s over the internet.
-        """
-        glob = self.store.fact_glob("specific_risk", self.model_id)
-        listing = self.store.sql(f"SELECT file FROM glob('{glob}')")
-        years = (listing["file"].str.extract(r"year=(\d+)", 1)
-                 .cast(pl.Int32).drop_nulls())
-        if years.is_empty():
-            raise ValueError(f"{self.model_id}: no dated specific_risk "
-                             f"files under {glob}")
-        row = self.store.sql(
-            f"SELECT min({COB_DATE}) lo, max({COB_DATE}) hi "
-            f"FROM read_parquet('{glob}', hive_partitioning=true) "
-            f"WHERE year IN ({years.min()}, {years.max()})").to_dicts()[0]
-        return row["lo"], row["hi"]
+        """First and last COB date this model has data for."""
+        return self.source.date_bounds(self.model_id)

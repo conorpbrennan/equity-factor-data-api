@@ -12,12 +12,12 @@ identical — the cache only changes where answers come from.
 from _bootstrap import setup
 
 from analytics import Portfolio, exposures
-from modelfacade import ModelFacade
+from modelfacade import ModelFacade, UserCache
 
 
 def main() -> None:
     root, model_id = setup(__doc__)
-    fac = ModelFacade.load(model_id, root)
+    fac = ModelFacade.load(model_id, root, cache=UserCache())
     positions = [1, 2, 3]
 
     try:
