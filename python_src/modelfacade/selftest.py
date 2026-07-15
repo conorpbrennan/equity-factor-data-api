@@ -322,6 +322,102 @@ def check_core_loadings(root):
     assert (lo, hi) == (DATES[0], DATES[-1])
 
 
+def check_custom_datasource(_root):
+    """Dependency inversion: the core runs against any DataSource — here a
+    handful of in-memory polars frames built by hand, instantiated outside
+    the package and passed into Model. No Store, no SQL, no files. This is
+    the shape a curated model store arrives in: a second implementation of
+    the same four-method protocol, with the core unchanged."""
+    from .datasource import DataSource
+
+    d0, d1 = date(2025, 3, 3), date(2025, 3, 4)
+    dims = {
+        "model_master": pl.DataFrame({
+            "model_id": ["MEM1"], "vendor": ["handmade"],
+            "cov_scaling": ["daily_var"],
+            "specific_risk_convention": ["daily_vol"],
+            "return_convention": ["daily_dec"],
+        }),
+        "factor_master": pl.DataFrame({
+            "model_id": ["MEM1", "MEM1"],
+            "factor_id": ["VALUE", "MARKET"],
+            "factor_seq": [0, 1],
+            "factor_type": ["STYLE", "MARKET"],
+        }),
+    }
+    facts = {
+        "factor_loading": pl.DataFrame({
+            "cob_date": [d0, d0, d1, d1], "asset_id": [1, 2, 1, 2],
+            "factor_id": ["VALUE"] * 4, "value": [0.11, 0.22, 0.33, 0.44],
+            "version_id": [1] * 4,
+        }),
+        # no 'type' column: a source from before the estimate stream
+        "factor_return": pl.DataFrame({
+            "cob_date": [d0, d1], "factor_id": ["VALUE"] * 2,
+            "value": [0.001, 0.002], "version_id": [1] * 2,
+        }),
+    }
+
+    class InMemorySource:
+        """The whole implementation — filters over plain frames."""
+
+        def dim(self, name):
+            return dims[name]
+
+        def read_fact(self, fact, model_id, *, start, end, assets=None,
+                      factors=None, version=1, pub_type=None):
+            f = facts[fact].filter(
+                pl.col("cob_date").is_between(start, end)
+                & (pl.col("version_id") == version))
+            if assets is not None:
+                f = f.filter(pl.col("asset_id").is_in([int(a) for a in assets]))
+            if factors is not None:
+                f = f.filter(pl.col("factor_id").is_in(list(factors)))
+            if pub_type is not None:
+                f = f.filter(pl.col("type") == pub_type)
+            return f
+
+        def has_column(self, fact, model_id, col):
+            return col in facts[fact].columns
+
+        def date_bounds(self, model_id):
+            return d0, d1
+
+    source = InMemorySource()
+    assert isinstance(source, DataSource)      # structural, no inheritance
+
+    model = Model(source, "MEM1")              # the core, fed from outside
+    assert model.factors == ["VALUE", "MARKET"]
+    assert model.conventions["return_convention"] == "daily_dec"
+    assert model.dates() == (d0, d1)
+    assert model.factor_loadings(d1, assets=[1])["value"].to_list() == [0.33]
+
+    # core policy holds over a foreign source: strictness and validation...
+    try:
+        model.factor_loadings("2025-03-04")
+        raise AssertionError("core accepted a string date")
+    except TypeError:
+        pass
+    try:
+        model.factor_loadings(d1, factors=["NOT_A_FACTOR"])
+        raise AssertionError("core accepted an unknown factor")
+    except ValueError:
+        pass
+    # ...and the estimate-stream contract: no type column means OFFICIAL
+    # serves and estimate requests refuse, same rule as a legacy store
+    assert model.factor_returns(d0, d1)["value"].to_list() == [0.001, 0.002]
+    try:
+        model.factor_returns(d0, d1, pub_type="T0_ESTIMATE")
+        raise AssertionError("estimates served from a source with no stream")
+    except ValueError:
+        pass
+
+    # the facade wraps it untouched: leniency + pivot over any source
+    fac = ModelFacade(model, output="polars")
+    wide = fac.get_factor_loadings("2025-03-04", assets=[1])
+    assert wide["VALUE"].to_list() == [0.33]
+
+
 def check_facade_dates_and_wide(root):
     """Facade leniency, date edition: 'YYYY-MM-DD' strings resolve to the same
     frame as datetime.date, 'latest' resolves to the store's last COB, and
@@ -519,7 +615,7 @@ def check_from_cache_offline(root):
             assert (saved / "dims" / f"{dim}.parquet").exists(), dim
 
         b = ModelFacade.from_cache(MID, str(root), output="polars")      # fresh 'session'
-        store = b.core.store
+        store = b.core.source
         assert store._con is None                        # never connected
         b.get_factor_loadings("latest", assets=[1, 2])
         b.get_specific_risk("latest", assets=["AX0000001"])   # xref offline
@@ -614,6 +710,7 @@ CHECKS = [
     ("store: list_models sees the fleet", check_list_models),
     ("core: rejects string/datetime dates, unknown models/factors", check_core_strictness),
     ("core: sparse long loadings, raw conventions, date range", check_core_loadings),
+    ("core: any DataSource — in-memory source built outside, passed in", check_custom_datasource),
     ("facade: string dates + 'latest', wide pivot with 0.0 fill", check_facade_dates_and_wide),
     ("facade: vendor ids via asset_xref (explicit + detected)", check_facade_identifiers),
     ("facade: canonical units (srisk, returns, covariance)", check_facade_units),

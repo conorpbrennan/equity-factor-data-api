@@ -154,7 +154,7 @@ def main() -> None:
 
     # demo ids looked up from assets actually covered at the latest date,
     # so the tour holds on any store, not just the micro fixture
-    xref = fac.core.store.dim("asset_xref")
+    xref = fac.core.source.dim("asset_xref")
     a1, a2 = wide[ASSET_ID][0], wide[ASSET_ID][1]
     ax_id, b_id = [
         xref.filter((pl.col("vendor") == vendor)

@@ -127,7 +127,7 @@ class ModelFacade:
         assets = list(assets)
         if all(isinstance(a, int) for a in assets):
             return assets
-        xref = self._model.store.dim("asset_xref")
+        xref = self._model.source.dim("asset_xref")
         if sec_id_type is not None:
             xref = xref.filter(pl.col("vendor") == sec_id_type_str(sec_id_type))
         wanted = [str(a) for a in assets]
@@ -287,14 +287,8 @@ class ModelFacade:
         self.cache.put("factor_loading",
                        m.loading_history(start, cob, assets=ids),
                        Coverage(start, cob, scope))
-        srisk = m.store.sql(
-            f"SELECT * FROM read_parquet("
-            f"'{m.store.fact_glob('specific_risk', m.model_id)}', "
-            f"hive_partitioning=true) "
-            f"WHERE year = {cob.year} "
-            f"AND {COB_DATE} BETWEEN DATE '{start}' AND DATE '{cob}' "
-            f"AND {ASSET_ID} IN ({', '.join(map(str, ids))}) "
-            f"AND version_id = 1").drop("year", "model_id")
+        srisk = m.source.read_fact("specific_risk", m.model_id,
+                                   start=start, end=cob, assets=ids)
         self.cache.put("specific_risk", srisk, Coverage(start, cob, scope))
         self.cache.put("factor_return",
                        m.factor_returns(start, cob),
@@ -350,7 +344,7 @@ class ModelFacade:
         dims = out / "dims"
         dims.mkdir(exist_ok=True)
         for name in ("model_master", "factor_master", "asset_xref"):
-            self._model.store.dim(name).write_parquet(dims / f"{name}.parquet")
+            self._model.source.dim(name).write_parquet(dims / f"{name}.parquet")
         return out
 
     def load_cache(self, path=None, as_of=None, *,
