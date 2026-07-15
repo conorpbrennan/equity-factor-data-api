@@ -35,7 +35,7 @@ import polars as pl
 
 from analytics import (Portfolio, exposure_change, exposures,
                        pnl_decomposition)
-from modelfacade import ModelFacade, inventory
+from modelfacade import ModelFacade, UserCache, inventory
 
 
 def results_base() -> Path:
@@ -111,7 +111,7 @@ def main() -> int:
         root, model_id = args.root, args.model
         books = json.loads(Path(args.portfolios).expanduser().read_text())
 
-    fac = ModelFacade.load(model_id, root)
+    fac = ModelFacade.load(model_id, root, cache=UserCache())
     fac.warm([int(a) for h in books.values() for a in h])   # one warm, N books
     results = [run_one(fac, name, holdings, args.flash)
                for name, holdings in books.items()]

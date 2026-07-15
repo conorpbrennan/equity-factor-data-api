@@ -11,6 +11,12 @@ dataset plus a manifest.json carrying the coverage declarations, so a set
 warmed once — by an earlier session, or a scheduled morning job — is reusable
 across sessions. Persistence freezes the data as of the save; the caller
 decides when a saved set is too old and re-warms.
+
+Caching is OFF by default (project decision, 2026-07-15): a facade built
+without cache= gets NoCache, where every request falls through to the store.
+Opting in — and every staleness trade-off that comes with it — is the
+caller's explicit choice: pass cache=UserCache(), or adopt a persisted set
+via load_cache()/from_cache().
 """
 
 from __future__ import annotations
@@ -30,6 +36,32 @@ class Coverage:
     start: date
     end: date
     assets: frozenset[int] | None    # None = all assets
+
+
+class NoCache:
+    """The off-by-default state: nothing is retained, every get() falls
+    through to its loader. warm() refuses (put raises) — a working set with
+    nowhere to live is a silent no-op the user would misread as warmed."""
+
+    def __init__(self) -> None:
+        self.coverage: dict[str, Coverage] = {}   # always empty
+
+    def get(self, dataset: str, start: date, end: date,
+            assets: list[int] | None, loader) -> pl.DataFrame:
+        return loader()
+
+    def put(self, dataset: str, frame: pl.DataFrame, cov: Coverage) -> None:
+        raise ValueError(
+            "caching is off by default — pass cache=UserCache() when "
+            "constructing the facade (ModelFacade.load(..., "
+            "cache=UserCache())) before warm()")
+
+    @property
+    def stats(self) -> dict:
+        return {"hits": 0, "misses": 0, "rows": {}}
+
+    def clear(self) -> None:
+        pass
 
 
 @dataclass

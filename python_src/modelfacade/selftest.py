@@ -34,6 +34,7 @@ import pyarrow.parquet as pq
 from conventions import SecurityIDType, scale_to_canonical, snake_case
 from conventions.signatures import DISCOURAGED
 
+from .cache import UserCache
 from .core import Model
 from .facade import ModelFacade
 from .store import Store, list_models
@@ -485,7 +486,8 @@ def check_t0_estimates(root):
     estimates=True switches streams and bypasses the cache (freshness is the
     point); pub_type is validated; and a legacy store without the column
     still serves official but refuses estimates loudly."""
-    fac = ModelFacade.load(MID, str(root), output="polars")
+    fac = ModelFacade.load(MID, str(root), output="polars",
+                           cache=UserCache())
     official = fac.get_factor_returns("2025-01-02", "2025-01-15")
     assert official.height == len(DATES) * len(FACTORS)       # one stream
     assert abs(official["value"][0] - 0.005) < 1e-12          # 0.5 daily_pct
@@ -515,13 +517,27 @@ def check_t0_estimates(root):
 
 
 def check_cache_prewarm(root):
-    """The pre-warm working-set design: before warm() every request is a
-    miss; warm([1,2,3]) loads YTD loadings + specific risk for those assets
-    plus all factor returns; afterwards any request *covered* by that set
-    (subset assets, subset dates) is served from cache, and a request outside
-    the warmed scope (asset 6) falls through to the store and still returns
+    """The opt-in pre-warm working-set design. Caching is OFF by default —
+    a facade built without cache= never retains anything and warm() refuses
+    (project decision, 2026-07-15: the staleness trade-off is the caller's).
+    With cache=UserCache(): before warm() every request is a miss;
+    warm([1,2,3]) loads YTD loadings + specific risk for those assets plus
+    all factor returns; afterwards any request *covered* by that set (subset
+    assets, subset dates) is served from cache, and a request outside the
+    warmed scope (asset 6) falls through to the store and still returns
     correct data."""
-    fac = ModelFacade.load(MID, str(root), output="polars")
+    off = ModelFacade.load(MID, str(root), output="polars")   # no cache=
+    off.get_factor_loadings("latest", assets=[1])
+    off.get_factor_loadings("latest", assets=[1])             # twice
+    assert off.cache.stats == {"hits": 0, "misses": 0, "rows": {}}
+    try:
+        off.warm([1, 2, 3])
+        raise AssertionError("warm() succeeded without an opted-in cache")
+    except ValueError as e:
+        assert "off by default" in str(e)
+
+    fac = ModelFacade.load(MID, str(root), output="polars",
+                           cache=UserCache())
     fac.get_factor_loadings("latest", assets=[1])              # cold: miss
     assert fac.cache.stats["misses"] == 1 and fac.cache.stats["hits"] == 0
     fac.warm([1, 2, 3])
@@ -549,7 +565,8 @@ def check_cache_persistence(root):
     a different model refuses the saved set."""
     os.environ["FACTOR_CACHE_DIR"] = str(Path(root) / "cachebase")
     try:
-        a = ModelFacade.load(MID, str(root), output="polars")
+        a = ModelFacade.load(MID, str(root), output="polars",
+                             cache=UserCache())
         try:
             a.save_cache()                              # nothing warmed yet
             raise AssertionError("saved an empty working set")
@@ -608,7 +625,8 @@ def check_from_cache_offline(root):
     request. Only a request outside coverage may fall through."""
     os.environ["FACTOR_CACHE_DIR"] = str(Path(root) / "offlinebase")
     try:
-        a = ModelFacade.load(MID, str(root), output="polars")
+        a = ModelFacade.load(MID, str(root), output="polars",
+                             cache=UserCache())
         a.warm([1, 2, 3])
         saved = a.save_cache()
         for dim in ("model_master", "factor_master", "asset_xref"):
@@ -715,7 +733,7 @@ CHECKS = [
     ("facade: vendor ids via asset_xref (explicit + detected)", check_facade_identifiers),
     ("facade: canonical units (srisk, returns, covariance)", check_facade_units),
     ("facade: T0 estimate stream via the type column", check_t0_estimates),
-    ("facade: pre-warm cache serves covered subsets", check_cache_prewarm),
+    ("facade: cache off by default; opt-in pre-warm serves covered subsets", check_cache_prewarm),
     ("facade: cache persists to parquet, reloads across sessions", check_cache_persistence),
     ("facade: from_cache cold-starts offline, zero store contact", check_from_cache_offline),
     ("inventory: static model inventory matches ids and store schema", check_inventory),

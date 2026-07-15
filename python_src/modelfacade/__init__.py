@@ -17,10 +17,11 @@ transforms_b generic-slot tables as a fast path when present).
 """
 
 from . import inventory
+from .cache import UserCache
 from .core import Model
 from .datasource import DataSource
 from .facade import ModelFacade
 from .store import Store, list_models
 
-__all__ = ["DataSource", "Model", "ModelFacade", "Store", "inventory",
-           "list_models"]
+__all__ = ["DataSource", "Model", "ModelFacade", "Store", "UserCache",
+           "inventory", "list_models"]

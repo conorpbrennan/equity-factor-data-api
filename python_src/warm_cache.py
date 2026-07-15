@@ -37,7 +37,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from modelfacade import ModelFacade
+from modelfacade import ModelFacade, UserCache
 
 
 def read_positions(path: str) -> list:
@@ -60,7 +60,7 @@ def warm_one(model_id: str, root: str | None, positions: list,
              as_of, sec_id_type) -> bool:
     """Warm and persist one model's working set; never raises (cron-safe)."""
     try:
-        fac = ModelFacade.load(model_id, root)
+        fac = ModelFacade.load(model_id, root, cache=UserCache())
         stats = fac.warm(positions, as_of=as_of, sec_id_type=sec_id_type)
         saved_to = fac.save_cache()
         rows = ", ".join(f"{k}={v}" for k, v in stats["rows"].items())
