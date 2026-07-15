@@ -83,10 +83,14 @@
 <p class="eyebrow">Equity factor data · summary for Alex</p>
 <h1>A factor-model data layer, built and measured at beyond-SFM scale</h1>
 <p class="context">
-Over the last two weeks I built a working scaffold for vendor factor-model data —
-storage, access API, and portfolio analytics — against a full-scale synthetic
-dataset, with Chris Haltiner steering the requirements throughout. This page is
-the skim: what the measurements say, what was decided, and what remains open.
+The goal of this work: give SFM's factor-model data discussions a measured,
+working basis — a prototype that settles by experiment what would otherwise be
+settled by opinion, before any platform or infrastructure commitment is made.
+Over the last two weeks I built that prototype end to end — storage, access
+API, and portfolio analytics — against a full-scale synthetic dataset, with
+Chris Haltiner steering the requirements throughout. This page is the skim:
+what the measurements say, what was settled for the prototype, and what
+remains open.
 Everything regenerates from config; the code and full benchmark reports are in
 the repo (<span class="mono">github.com/conorpbrennan/equity-factor-data-api</span>).
 </p>
@@ -232,13 +236,13 @@ out byte-identical, so any finding can be reproduced from a one-page config.
   <!-- core library: fed by the facade, no I/O of its own -->
   <rect class="box" x="530" y="200" width="180" height="92"/>
   <text class="t" x="544" y="222">Core library — strict</text>
-  <text x="544" y="244">all data passed in — no I/O</text>
+  <text x="544" y="244">reads via a core-owned contract</text>
   <text x="544" y="262">exact types, validated values</text>
   <text class="s" x="544" y="280">systems &amp; analytics build here</text>
   <line class="flow" x1="470" y1="160" x2="500" y2="160"/>
   <line class="flow" x1="500" y1="160" x2="500" y2="246"/>
   <line class="flow" x1="500" y1="246" x2="530" y2="246"/>
-  <text class="s" x="508" y="190">data passed in</text>
+  <text class="s" x="508" y="190">source handed in</text>
 
   <!-- offline working set -->
   <rect class="box" x="250" y="200" width="220" height="92"/>
@@ -251,27 +255,37 @@ out byte-identical, so any finding can be reproduced from a one-page config.
 </svg>
 </figure>
 <p class="fig-note">Two layers with two contracts: a lenient facade humans
-actually use, and a strict core library that performs no I/O — every input is
-passed in, validated, exact. The facade is the only component that loads:
-covered requests are answered from its warmed working set locally, and a miss
-sends SQL to the on-demand in-region engine, which scans the Parquet next to
-the data and shuts down when the queries stop. With no engine configured the
-facade scans S3 directly — slower, same results. Loading, unit conversion and
-id resolution therefore live in one place, and the core stays pure enough for
-any system to build on.</p>
+actually use, and a strict core library that sources no data itself — it
+reads through a small data-source contract it owns, and every value it sees
+is validated and exact. The facade wires the concrete source in and stays a
+thin wrapper the core never depends on: covered requests are answered from
+its warmed working set locally, and a miss sends SQL to the on-demand
+in-region engine, which scans the Parquet next to the data and shuts down
+when the queries stop. With no engine configured the store is scanned
+directly — slower, same results. Loading, unit conversion and id resolution
+therefore live in one place — the load path — and the core stays pure enough
+for any system to build on.</p>
 
 <div class="callout">
-  <p class="lead">Design principle: the core computes; it never loads.</p>
-  <p>All data enters the core library by being passed in — validated, exact,
-  canonical. It performs no I/O of its own. That buys three things: the core
-  is deterministic and trivially testable (no store, no network, no clock in
-  the way); there is exactly <span class="n">one load path</span> in the
-  system, so unit conversion, identifier resolution, and any future
-  entitlement or audit control happen in one place rather than wherever a
-  query happened to run; and the core is portable — it computes the same
-  answer whether the data arrived from S3, a warmed local set, or a future
-  platform's tables. The strict/lenient split only works because of this:
-  leniency lives where the loading is, purity lives where the maths is.</p>
+  <p class="lead">Design principle: the core computes; it never sources data.</p>
+  <p>The core library holds no loading logic and depends on no other layer.
+  What it holds is a contract: a small data-source interface, owned by the
+  core, stating what it needs — semantic, model-agnostic reads, no SQL, no
+  storage layout. Anything satisfying the contract can be instantiated
+  outside and handed in; the test suite proves it by driving the core from a
+  hand-built in-memory source with no store behind it at all. The facade
+  stays what it should be — a thin convenience wrapper that wires a concrete
+  source in and adds leniency on top; nothing in the core depends on it.
+  That buys three things: the core is deterministic and trivially testable
+  (no store, no network, no clock in the way); there is exactly
+  <span class="n">one load path</span> in the system, so unit conversion,
+  identifier resolution, and any future entitlement or audit control happen
+  in one place rather than wherever a query happened to run; and the core is
+  portable — it computes the same answer whether the data arrived from S3, a
+  warmed local set, or a future platform's tables. It is also the target
+  state in miniature: designated data loaders that convert vendor data once
+  and persist canonical, ready-to-use values in a curated model store are a
+  second implementation of the same contract — the core would not change.</p>
 </div>
 
 <h2 class="section-h">Where compute belongs: a requirement, measured</h2>
@@ -397,7 +411,12 @@ slot model is specifically how a schema absorbs the next addition without a
 migration, which is the property that keeps a generic design generic.
 </p>
 
-<h2 class="section-h">Decided with Chris, and what's open</h2>
+<h2 class="section-h">Settled for this prototype, and what's open</h2>
+<p class="section-sub">"Settled" means settled for the purpose of this
+prototype — working decisions taken with Chris so the build could proceed.
+Nothing here is decided for SFM's infrastructure: the related projects are
+in draft and under discussion, and every choice below stays open until it
+has been signed off.</p>
 <div class="cols2">
 <div>
 <p><span class="n">Settled (implemented):</span></p>
@@ -417,8 +436,10 @@ migration, which is the property that keeps a generic design generic.
 <div>
 <p><span class="n">Open, deliberately:</span></p>
 <ul class="tight">
-  <li>canonical units at the core layer vs the facade (Chris leans core;
-      I'm inclined to agree — it's a load-bearing refactor, sketch first)</li>
+  <li>canonical units: agreed direction is the load path — designated
+      loaders convert vendor units once and persist canonical values in a
+      curated model store, so the core never converts; the facade's
+      return-boundary conversion is the interim stand-in</li>
   <li>core operating on native vendor security ids (today's FMA practice)
       vs internal integer ids (as built)</li>
   <li>ModelFacade ownership — QDS-adjacent or Risk-owned; my lean is Risk,
@@ -432,8 +453,8 @@ migration, which is the property that keeps a generic design generic.
 </div>
 
 <footer>
-Prepared by Conor Brennan · 14 July 2026 · reviewed with Chris Haltiner before
-circulation · code, spec, benchmark suite and full reports:
+Prepared by Conor Brennan · revised 15 July 2026 · reviewed with Chris
+Haltiner before circulation · code, spec, benchmark suite and full reports:
 <span class="mono">github.com/conorpbrennan/equity-factor-data-api</span>
 </footer>
 

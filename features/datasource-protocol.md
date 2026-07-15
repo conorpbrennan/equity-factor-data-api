@@ -8,8 +8,24 @@
 
 ## Files involved
 
-<!-- populated on commit -->
+
+- python_src/examples/exposures_today.py
+- python_src/modelfacade/__init__.py
+- python_src/modelfacade/core.py
+- python_src/modelfacade/datasource.py
+- python_src/modelfacade/facade.py
+- python_src/modelfacade/selftest.py
+- python_src/modelfacade/store.py
+- python_src/usage_example.py
 
 ## History
 
-<!-- populated on commit -->
+- 2026-07-15 `6e46aa6` — core: invert the store dependency behind a core-owned DataSource protocol
+  - python_src/examples/exposures_today.py
+  - python_src/modelfacade/__init__.py
+  - python_src/modelfacade/core.py
+  - python_src/modelfacade/datasource.py
+  - python_src/modelfacade/facade.py
+  - python_src/modelfacade/selftest.py
+  - python_src/modelfacade/store.py
+  - python_src/usage_example.py
