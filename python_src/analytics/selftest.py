@@ -21,8 +21,9 @@ from modelfacade import Model, ModelFacade, Store
 from modelfacade.selftest import DATES, MID, build_micro_store, loading_value
 
 from .functions import (estimate_factor_returns, exposure_change, exposures,
-                        pnl_decomposition)
+                        pnl_decomposition, volatility)
 from .portfolio import Portfolio
+from .riskprofile import RiskProfile
 
 # The test book: long 10mm of asset 1, 20mm of asset 2, at the last COB.
 PORT = {1: 10.0, 2: 20.0}
@@ -177,6 +178,106 @@ def check_t0_estimation(root):
         assert abs(computed - 0.006) < 1e-12
 
 
+def check_risk_profile(root):
+    """The PAS risk-profile requirement (2026-07-15): an arbitrary
+    combination of factor exposures and specific-risk positions, not
+    representable as securities, analyzable like a portfolio.
+    from_portfolio materializes the canonical first step (exposures match
+    exposures(model, port) exactly, holdings carried as the specific leg);
+    a hand-built unit profile prices against both return streams with
+    exposures fixed across the window; profiles compose arithmetically;
+    unknown factors and exposure_change refuse loudly."""
+    core = Model(Store.open(str(root)), MID)
+    book = _port()
+    prof = RiskProfile.from_portfolio(core, book)
+    assert prof.as_of == book.as_of
+    assert exposures(core, prof).equals(exposures(core, book))
+    assert prof.specific.equals(book.holdings)
+
+    # same-day decomposition matches the portfolio's, factor for factor
+    p_prof = pnl_decomposition(core, prof, start=DATES[-1])
+    p_book = pnl_decomposition(core, book, start=DATES[-1])
+    d1 = dict(zip(p_prof["factor_id"], p_prof["pnl"]))
+    d2 = dict(zip(p_book["factor_id"], p_book["pnl"]))
+    assert d1.keys() == d2.keys()
+    assert all(abs(d1[k] - d2[k]) < 1e-9 for k in d1)
+
+    # Chris's example shape: unit exposure to a style + one name's specific
+    # risk. Exposures are fixed across the window (that IS a profile), so
+    # every day prices at 1.0 x the canonical return.
+    unit = RiskProfile.from_exposures("unit_value", DATES[-1],
+                                      {"VALUE": 1.0}, specific={1: 1.0})
+    pnl = pnl_decomposition(core, unit, start=DATES[0], end=DATES[-1])
+    assert pnl.height == len(DATES)
+    assert set(pnl["factor_id"]) == {"VALUE"}
+    assert all(abs(v - 1.0) < 1e-12 for v in pnl["exposure"])
+    assert all(abs(v - 0.005) < 1e-12 for v in pnl["pnl"])   # official
+    flash = pnl_decomposition(core, unit, start=DATES[-1], estimates=True)
+    assert abs(flash["pnl"][0] - 0.006) < 1e-12              # flash
+
+    # arithmetic: hedge the unit exposure out of the book's profile
+    hedged = prof - unit
+    got = dict(zip(hedged.exposures["factor_id"],
+                   hedged.exposures["exposure"]))
+    want = dict(zip(prof.exposures["factor_id"],
+                    prof.exposures["exposure"]))
+    assert abs(got["VALUE"] - (want["VALUE"] - 1.0)) < 1e-12
+    spec = dict(zip(hedged.specific["asset_id"], hedged.specific["value"]))
+    assert abs(spec[1] - 9.0) < 1e-12                        # 10 - 1
+
+    try:
+        exposures(core, RiskProfile.from_exposures(
+            "bad", DATES[-1], {"NOT_A_FACTOR": 1.0}))
+        raise AssertionError("exposure to an unknown factor accepted")
+    except ValueError:
+        pass
+    try:
+        exposure_change(core, prof, start=DATES[0], end=DATES[-1])
+        raise AssertionError("exposure_change accepted a profile")
+    except TypeError:
+        pass
+
+
+def check_volatility(root):
+    """vol² = x'Σx + Σ (value·srisk)², canonical units, $mm annualized.
+    Hand-checkable on the micro store: covariance is 4.0 diag / 1.0 off in
+    ann_var_pct2 (4e-4 / 1e-4 canonical), specific risk is 28+asset_id in
+    ann_vol_pct. A unit VALUE profile with asset 1's specific risk gives
+    exactly 4e-4 + 0.29²; the book's factor leg is recomputed here from
+    its exposures pair by pair; a portfolio and its materialized profile
+    agree component for component."""
+    core = Model(Store.open(str(root)), MID)
+
+    unit = RiskProfile.from_exposures("u", DATES[-1], {"VALUE": 1.0},
+                                      specific={1: 1.0})
+    v = dict(zip(volatility(core, unit)["component"],
+                 volatility(core, unit)["variance"]))
+    assert abs(v["factor"] - 4e-4) < 1e-15
+    assert abs(v["specific"] - 0.29 ** 2) < 1e-12
+    assert abs(v["total"] - (4e-4 + 0.29 ** 2)) < 1e-12
+
+    book = _port()                                     # {1: 10, 2: 20}
+    vb = volatility(core, book)
+    x = dict(zip(exposures(core, book)["factor_id"],
+                 exposures(core, book)["exposure"]))
+    xs = list(x.values())
+    want_factor = (sum(4e-4 * xi * xi for xi in xs)
+                   + 2 * 1e-4 * sum(xs[i] * xs[j]
+                                    for i in range(len(xs))
+                                    for j in range(i + 1, len(xs))))
+    want_specific = (10 * 0.29) ** 2 + (20 * 0.30) ** 2   # srisk 28+id
+    got = dict(zip(vb["component"], vb["variance"]))
+    assert abs(got["factor"] - want_factor) < 1e-9
+    assert abs(got["specific"] - want_specific) < 1e-9
+    assert abs(got["total"] - (want_factor + want_specific)) < 1e-9
+    totals = dict(zip(vb["component"], vb["vol"]))
+    assert abs(totals["total"] - got["total"] ** 0.5) < 1e-12
+
+    vp = volatility(core, RiskProfile.from_portfolio(core, book))
+    for a, b in zip(vb["variance"], vp["variance"]):
+        assert abs(a - b) < 1e-9                       # profile == book
+
+
 CHECKS = [
     ("portfolio: canonical construction, weights, strict as_of",
      check_portfolio_construction),
@@ -192,6 +293,10 @@ CHECKS = [
      check_exposure_change),
     ("t0 estimation: FMP × asset returns == stored estimate stream",
      check_t0_estimation),
+    ("risk profile: exposures + specific risk as a first-class scope",
+     check_risk_profile),
+    ("volatility: x'Σx + specific leg, portfolio == its profile",
+     check_volatility),
 ]
 
 

@@ -7,6 +7,11 @@ computes. Both accept the strict core Model or a ModelFacade (unwrapped via
 conventions library — so they compose with either layer without double
 conversion.
 
+Scope can be a Portfolio (holdings; exposures computed from each date's
+loadings) or a RiskProfile (a fixed exposure combination; nothing
+recomputed — that fixity is what a profile means). exposure_change is
+Portfolio-only: profile exposures cannot drift.
+
 Units: holdings are $mm (conventions money), loadings unitless, returns
 canonical daily decimal — so exposures are "$mm per unit loading" and PnL
 contributions are $mm.
@@ -22,6 +27,7 @@ from conventions import (ASSET_ID, COB_DATE, FACTOR_ID, OFFICIAL,
                          T0_ESTIMATE, VALUE, WEIGHT, scale_to_canonical)
 
 from .portfolio import Portfolio
+from .riskprofile import EXPOSURE, RiskProfile
 
 _POS = "position_value"      # holdings value, renamed to avoid clashing with
                              # the loadings' raw `value` column
@@ -40,46 +46,71 @@ def _ordered(frame: pl.DataFrame, factors: list[str]) -> pl.DataFrame:
             .sort("_seq").drop("_seq"))
 
 
-def exposures(model, portfolio: Portfolio, *,
-              factors: list[str] | None = None) -> pl.DataFrame:
-    """Value-weighted factor exposures at the portfolio's as-of date.
+def _profile_exposures(core, profile: RiskProfile,
+                       factors: list[str] | None) -> pl.DataFrame:
+    """A profile's exposures, validated against the model's factor set."""
+    bad = sorted(set(profile.factors) - set(core.factors))
+    if bad:
+        raise ValueError(f"profile {profile.name!r} has exposures to "
+                         f"factors not in {core.model_id}: {bad}")
+    exp = profile.exposures
+    if factors is not None:
+        exp = exp.filter(pl.col(FACTOR_ID).is_in(list(factors)))
+    return exp
 
-    exposure_f = Σ_i value_i · loading_{i,f} — in $mm per unit loading.
-    Factors no holding loads on are absent (a sparse store row that doesn't
-    exist is an exposure of zero).
+
+def exposures(model, portfolio: Portfolio | RiskProfile, *,
+              factors: list[str] | None = None) -> pl.DataFrame:
+    """Value-weighted factor exposures at the scope's as-of date.
+
+    For a Portfolio: exposure_f = Σ_i value_i · loading_{i,f} — in $mm per
+    unit loading. Factors no holding loads on are absent (a sparse store
+    row that doesn't exist is an exposure of zero). For a RiskProfile: its
+    stated exposures, validated against the model's factor set — nothing
+    recomputed.
 
     Args:
         model: Core ``Model`` or ``ModelFacade``.
-        portfolio: Scope and as-of date; holdings in $mm.
+        portfolio: Scope and as-of date — a ``Portfolio`` (holdings in
+            $mm) or a ``RiskProfile`` (exposures passed through).
         factors: Subset of factor ids; None = all model factors.
 
     Returns:
         (factor_id, exposure) in factor_seq order.
+
+    Raises:
+        ValueError: Profile exposures to factors the model doesn't have.
     """
     core = _core(model)
+    if isinstance(portfolio, RiskProfile):
+        return _ordered(_profile_exposures(core, portfolio, factors),
+                        core.factors)
     loadings = core.factor_loadings(portfolio.as_of,
                                     assets=portfolio.assets, factors=factors)
     holdings = portfolio.holdings.rename({VALUE: _POS})
     out = (loadings.join(holdings, on=ASSET_ID)
            .group_by(FACTOR_ID)
-           .agg((pl.col(VALUE) * pl.col(_POS)).sum().alias("exposure")))
+           .agg((pl.col(VALUE) * pl.col(_POS)).sum().alias(EXPOSURE)))
     return _ordered(out, core.factors)
 
 
-def pnl_decomposition(model, portfolio: Portfolio, *,
+def pnl_decomposition(model, portfolio: Portfolio | RiskProfile, *,
                       start: date, end: date | None = None,
                       estimates: bool = False) -> pl.DataFrame:
     """Per-factor PnL contributions over a date range.
 
-    contribution_{f,d} = exposure_{f,d} · return_{f,d} — exposures
-    recomputed from each date's loadings, returns converted to canonical
-    daily decimal, so contributions are $mm. Holdings are held constant
-    over the window (buy-and-hold values; no drift, no trades) — the
-    scaffold simplification to state up front.
+    contribution_{f,d} = exposure_{f,d} · return_{f,d} — returns converted
+    to canonical daily decimal, so contributions are $mm. For a Portfolio,
+    exposures are recomputed from each date's loadings with holdings held
+    constant over the window (buy-and-hold values; no drift, no trades) —
+    the scaffold simplification to state up front. For a RiskProfile the
+    exposures are fixed across the window by definition — a profile is a
+    stated combination, not positions that drift.
 
     Args:
         model: Core ``Model`` or ``ModelFacade``.
-        portfolio: Scope; holdings in $mm.
+        portfolio: Scope — a ``Portfolio`` (holdings in $mm) or a
+            ``RiskProfile`` (fixed exposures).
         start: Range start (inclusive), ``datetime.date``.
         end: Range end (inclusive); None = ``start`` only.
         estimates: False = the vendor OFFICIAL return stream. True = the
@@ -88,11 +119,11 @@ def pnl_decomposition(model, portfolio: Portfolio, *,
 
     Returns:
         (cob_date, factor_id, exposure, fret, pnl) — one row per date per
-        factor the portfolio has exposure to; ``pnl`` in $mm.
+        factor the scope has exposure to; ``pnl`` in $mm.
 
     Raises:
         ValueError: ``estimates=True`` against a store with no estimate
-            stream.
+            stream, or profile exposures unknown to the model.
     """
     core = _core(model)
     end = end or start
@@ -104,16 +135,81 @@ def pnl_decomposition(model, portfolio: Portfolio, *,
     rets = (rets.select(COB_DATE, FACTOR_ID,
                         (pl.col(VALUE) * scale).alias("fret")))
 
-    history = core.loading_history(start, end, assets=portfolio.assets)
-    holdings = portfolio.holdings.rename({VALUE: _POS})
-    exp = (history.join(holdings, on=ASSET_ID)
-           .group_by(COB_DATE, FACTOR_ID)
-           .agg((pl.col(VALUE) * pl.col(_POS)).sum().alias("exposure")))
-
-    out = (exp.join(rets, on=[COB_DATE, FACTOR_ID])
-           .with_columns((pl.col("exposure") * pl.col("fret")).alias("pnl")))
+    if isinstance(portfolio, RiskProfile):
+        exp = _profile_exposures(core, portfolio, None)
+        out = (rets.join(exp, on=FACTOR_ID)
+               .select(COB_DATE, FACTOR_ID, EXPOSURE, "fret"))
+    else:
+        history = core.loading_history(start, end, assets=portfolio.assets)
+        holdings = portfolio.holdings.rename({VALUE: _POS})
+        out = (history.join(holdings, on=ASSET_ID)
+               .group_by(COB_DATE, FACTOR_ID)
+               .agg((pl.col(VALUE) * pl.col(_POS)).sum().alias(EXPOSURE))
+               .join(rets, on=[COB_DATE, FACTOR_ID]))
+    out = out.with_columns((pl.col(EXPOSURE) * pl.col("fret")).alias("pnl"))
     return _ordered(out.sort(COB_DATE), core.factors).sort(COB_DATE,
                                                            maintain_order=True)
+
+
+def volatility(model, portfolio: Portfolio | RiskProfile) -> pl.DataFrame:
+    """Annualized dollar volatility at the scope's as-of date, decomposed.
+
+    variance = x'Σx + Σ_i (value_i · srisk_i)² — factor exposures against
+    the factor covariance, plus the independent specific leg. Covariance
+    and specific risk are canonicalized (annualized decimal², annualized
+    decimal vol), exposures and positions are $mm, so variances are $mm²
+    and vols $mm, annualized. This is the analytic the RiskProfile's
+    specific leg exists for: a profile of pure factor exposures has a zero
+    specific leg; a portfolio uses its holdings.
+
+    Args:
+        model: Core ``Model`` or ``ModelFacade``.
+        portfolio: Scope — ``Portfolio`` (exposures computed at its as-of
+            date, holdings as the specific positions) or ``RiskProfile``
+            (stated exposures and specific positions).
+
+    Returns:
+        Three rows — (component, variance, vol) for ``factor``,
+        ``specific``, ``total``. Component variances add; vols don't.
+
+    Raises:
+        ValueError: Profile exposures to factors the model doesn't have.
+    """
+    from math import sqrt
+
+    core = _core(model)
+    as_of = portfolio.as_of
+    exp = exposures(model, portfolio)
+
+    cov = core.covariance(as_of)     # upper triangle: diag once, off twice
+    cscale = scale_to_canonical("covariance", core.conventions["cov_scaling"])
+    x1 = exp.rename({FACTOR_ID: "factor_id_1", EXPOSURE: "x1"})
+    x2 = exp.rename({FACTOR_ID: "factor_id_2", EXPOSURE: "x2"})
+    pairs = (cov.join(x1, on="factor_id_1").join(x2, on="factor_id_2")
+             .with_columns(
+                 (pl.when(pl.col("factor_id_1") == pl.col("factor_id_2"))
+                  .then(1.0).otherwise(2.0)
+                  * pl.col("x1") * pl.col(VALUE) * cscale * pl.col("x2"))
+                 .alias("contrib")))
+    factor_var = float(pairs["contrib"].sum())
+
+    positions = (portfolio.specific if isinstance(portfolio, RiskProfile)
+                 else portfolio.holdings)
+    specific_var = 0.0
+    if positions.height:
+        sscale = scale_to_canonical(
+            "specific_risk", core.conventions["specific_risk_convention"])
+        srisk = (core.specific_risk(as_of, assets=positions[ASSET_ID]
+                                    .to_list())
+                 .select(ASSET_ID, (pl.col(VALUE) * sscale).alias("srisk")))
+        joined = positions.join(srisk, on=ASSET_ID)
+        specific_var = float((joined[VALUE] * joined["srisk"]).pow(2).sum())
+    total_var = factor_var + specific_var
+    return pl.DataFrame({
+        "component": ["factor", "specific", "total"],
+        "variance": [factor_var, specific_var, total_var],
+        "vol": [sqrt(max(v, 0.0))
+                for v in (factor_var, specific_var, total_var)]})
 
 
 def estimate_factor_returns(model, as_of: date) -> pl.DataFrame:
@@ -172,6 +268,11 @@ def exposure_change(model, portfolio: Portfolio, *,
         date appear (absent side filled 0.0 — a position entering or
         leaving a factor is itself a change worth seeing).
     """
+    if isinstance(portfolio, RiskProfile):
+        raise TypeError(
+            f"exposure_change needs a Portfolio — {portfolio.name!r} is a "
+            "RiskProfile, whose exposures are fixed by definition and "
+            "cannot drift")
     core = _core(model)
     holdings = portfolio.holdings.rename({VALUE: _POS})
 

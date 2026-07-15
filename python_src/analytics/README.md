@@ -21,7 +21,19 @@ arithmetic combination of them.
   portfolio, `2 * book` scales, different as-of dates refuse to combine
 - strict about dates like the core layer (`datetime.date` only)
 
-Stateless functions (functions.py) — `(model, portfolio, ...) -> DataFrame`:
+`RiskProfile` (riskprofile.py) — the PAS requirement (2026-07-15): an
+arbitrary combination of factor exposures and specific-risk positions, not
+representable as securities, analyzable like a portfolio:
+
+- built from explicit exposures (`from_exposures`) or materialized from a
+  portfolio's canonical first analytic step (`from_portfolio(model, port)`)
+- accepted by `exposures()` (validated pass-through) and
+  `pnl_decomposition()` (exposures fixed across the window — that fixity is
+  what a profile means); `exposure_change` is Portfolio-only
+- same arithmetic as Portfolio, aligned on factor_id / asset_id
+
+Stateless functions (functions.py) — `(model, portfolio, ...) -> DataFrame`,
+where scope is a `Portfolio` or a `RiskProfile`:
 
 - `exposures(model, portfolio)` — value-weighted loadings,
   exposure_f = Σ value_i · loading_{i,f}, in $mm per unit loading
@@ -34,6 +46,11 @@ Stateless functions (functions.py) — `(model, portfolio, ...) -> DataFrame`:
 - `exposure_change(model, portfolio, start=, end=, by_asset=)` — "this
   moved, where is it coming from?": per-factor changes, attributed per
   asset on demand
+- `volatility(model, portfolio)` — annualized dollar vol at the scope's
+  as-of date, decomposed: vol² = x'Σx + Σ (value·srisk)², returned as
+  (component, variance, vol) rows for factor / specific / total. Works on
+  a Portfolio or a RiskProfile — this is the analytic the profile's
+  specific leg exists for
 - `estimate_factor_returns(model, as_of)` — the top of the T0 pipeline:
   FMP weights × same-day asset returns; the selftest asserts parity with
   the stored estimate stream

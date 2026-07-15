@@ -100,7 +100,7 @@ class Model:
             assets=assets, factors=factors, version=version)
 
     def loading_history(self, start: date, end: date, *,
-                        assets: Sequence[int],
+                        assets: Sequence[int] | None = None,
                         factors: Sequence[str] | None = None,
                         version: int = 1) -> pl.DataFrame:
         _require_date(start, "start"), _require_date(end, "end")
@@ -130,6 +130,15 @@ class Model:
         return self.source.read_fact(
             "specific_risk", self.model_id, start=as_of, end=as_of,
             assets=assets, version=version)
+
+    def specific_risk_history(self, start: date, end: date, *,
+                              assets: Sequence[int] | None = None,
+                              version: int = 1) -> pl.DataFrame:
+        _require_date(start, "start"), _require_date(end, "end")
+        return (self.source.read_fact(
+                    "specific_risk", self.model_id, start=start, end=end,
+                    assets=assets, version=version)
+                .sort(ASSET_ID, COB_DATE))
 
     def factor_returns(self, start: date, end: date, *,
                        factors: Sequence[str] | None = None,

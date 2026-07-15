@@ -59,6 +59,9 @@ fac.describe()                                     # styles, dates, raw units
 
 fac.get_factor_loadings("latest")                  # wide, 1 col per factor
 fac.get_factor_loadings("2025-01-06", assets=["AX0000003"])  # vendor ids ok
+fac.get_factor_loadings(start="2025-01-02", end="2025-01-15")  # date range
+fac.get_security_panel("2025-01-02", "2025-01-15", securities=[1, 2])
+                       # loadings + specific_risk + return, one joined panel
 fac.get_specific_risk("latest")                    # canonical ann. decimal vol
 fac.get_factor_returns("2025-01-02", "2025-01-15") # canonical daily decimal
 fac.get_factor_returns(estimates=True)             # T0 estimate stream
@@ -89,6 +92,15 @@ pnl_decomposition(fac, book, start=date(2025, 1, 15), estimates=True)  # flash
 from analytics import estimate_factor_returns
 estimate_factor_returns(fac, date(2025, 1, 15))   # T0 estimation itself:
                                                   # FMP weights × asset returns
+
+from analytics import RiskProfile                 # exposures + specific risk
+prof = RiskProfile.from_portfolio(fac, book)      # as a first-class scope
+unit = RiskProfile.from_exposures("u", date(2025, 1, 15), {"VALUE": 1.0})
+pnl_decomposition(fac, prof - unit, start=date(2025, 1, 15))  # hedged book
+
+from analytics import volatility                  # x'Σx + specific leg
+volatility(fac, book)     # (component, variance, vol): factor/specific/total
+volatility(fac, prof)     # $mm annualized; works on either scope
 ```
 
 For batch work ("run analytics for all my books and persist the results"),
@@ -148,5 +160,5 @@ than writing from scratch.
   `fac.load_cache()` adopts a set persisted by `python warm_cache.py`, and
   `ModelFacade.from_cache(model_id, root)` cold-starts from one with zero
   store contact (see Setup). `warm()` without an opted-in cache raises.
-- Verify claims with `python -m modelfacade selftest` (15 checks) and
-  `python -m analytics selftest` (7 checks).
+- Verify claims with `python -m modelfacade selftest` (16 checks) and
+  `python -m analytics selftest` (9 checks).
