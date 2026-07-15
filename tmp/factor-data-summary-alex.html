@@ -315,8 +315,11 @@ push the heavy scans to the data once a day, then keep the day local.
 </p>
 
 <h2 class="section-h">What runs on top</h2>
-<p><span class="n">The facade is far more than the loader.</span> Everything a
-user needs and a strict core must refuse lives in this one layer, so it is
+<p><span class="n">The facade composes the loader; it doesn't own it.</span>
+ModelFacade constructs a data source and passes it into the core Model as a
+convenience — the same source can be built outside the facade and handed to
+Model directly, and the test suite does exactly that. What the facade
+actually adds is everything a user needs and a strict core must refuse,
 defined once, identically for every consumer:</p>
 <ul class="tight">
   <li><span class="n">leniency at the boundary</span> — dates as strings,
@@ -421,12 +424,19 @@ has been signed off.</p>
 <div>
 <p><span class="n">Settled (implemented):</span></p>
 <ul class="tight">
+  <li>the core owns a small data-source contract; the facade
+      <span class="n">composes</span> a source and passes it into the core
+      Model as a convenience — the same source can be constructed outside
+      the facade and handed to Model directly (the test suite does), so
+      the core never depends on the facade</li>
   <li>user layer speaks <span class="n">pandas</span> by default — the installed
       notebook base is pandas-native; polars stays a per-facade opt-in</li>
   <li><span class="mono">sec_id_type</span> is a plain string with shared
       constants — odd schemes need no code change</li>
-  <li>cache invalidation: 1-day TTL on persisted working sets (morning re-warm
-      cadence) plus <span class="mono">clear()</span> for known restatements</li>
+  <li>caching is opt-in and off by default — the speed-vs-staleness
+      trade-off is the caller's, never a default; invalidation is a 1-day
+      TTL on persisted working sets (morning re-warm cadence) plus
+      <span class="mono">clear()</span> for known restatements</li>
   <li>model discoverability: static inventory now; target state is the
       inventory living in the curated store itself</li>
   <li>conventions governance: firm-wide conventions curated with other teams
@@ -448,6 +458,19 @@ has been signed off.</p>
       global models)</li>
   <li>FMP time-series queries want the same dual materialization as loadings,
       if that access pattern is real</li>
+  <li>cache design: generic (a decorator any data class adopts, with a
+      caller-supplied cache identity — Chris's preference) vs
+      facade-embedded. My read: they cache different things — the decorator
+      memoizes query results; ours declares a working set, which is what
+      makes the persisted morning warm and offline cold start possible —
+      and they compose rather than compete. Lean: make the opt-in
+      <span class="mono">cache=</span> convention the firm-wide standard now
+      (done here), build the generic layer when a second data class actually
+      needs it; the working set already sits behind that seam, so the
+      refactor is mechanical. One requirement either way: the cache key
+      must grow <span class="mono">as_of</span>/status the moment
+      restatement queries are exposed, so point-in-time answers can never
+      see a later republication</li>
 </ul>
 </div>
 </div>
