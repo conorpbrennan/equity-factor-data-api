@@ -152,15 +152,55 @@ class ModelFacade:
                col: str = VALUE) -> pl.DataFrame:
         return frame.with_columns(pl.col(col) * scale_to_canonical(kind, convention))
 
+    def _range(self, as_of, start, end) -> tuple[date, date]:
+        """Resolve the single-date vs date-range calling conventions:
+        start= switches to range mode ([start, end], end defaulting to
+        'latest'); otherwise [as_of, as_of]."""
+        if start is not None:
+            lo = self._as_date(start, "start")
+            hi = self._as_date(end, "end") if end is not None \
+                else self._as_date("latest")
+            return lo, hi
+        cob = self._as_date(as_of)
+        return cob, cob
+
+    def _loadings_long(self, lo: date, hi: date, ids, factors) -> pl.DataFrame:
+        """Sparse long-form loadings over [lo, hi], via the cache."""
+        if lo == hi:
+            loader = lambda: self._model.factor_loadings(
+                lo, assets=ids, factors=factors)
+        else:
+            loader = lambda: self._model.loading_history(
+                lo, hi, assets=ids, factors=factors)
+        long = self.cache.get("factor_loading", lo, hi, ids, loader)
+        if factors is not None:                       # cache holds all factors
+            long = long.filter(pl.col(FACTOR_ID).is_in(list(factors)))
+        return long
+
+    def _loadings_wide(self, long: pl.DataFrame, factors) -> pl.DataFrame:
+        cols = factors if factors is not None else self.factors
+        seen = set(long[FACTOR_ID].to_list())
+        present = [c for c in cols if c in seen]
+        wide = long.pivot(FACTOR_ID, index=[COB_DATE, ASSET_ID], values=VALUE)
+        # fill only the factor columns: a frame-level fill_null(0.0) would
+        # upcast the integer asset_id column to float
+        return (wide.with_columns(pl.col(present).fill_null(0.0))
+                .sort(COB_DATE, ASSET_ID)
+                .select([COB_DATE, ASSET_ID, *present]))
+
     # ------------------------------------------------------------ one-liners
-    def get_factor_loadings(self, as_of="latest", *, assets=None,
-                            sec_id_type=None, factors=None,
+    def get_factor_loadings(self, as_of="latest", *, start=None, end=None,
+                            assets=None, sec_id_type=None, factors=None,
                             wide: bool = True):
-        """Factor loadings for one date. Loadings are unitless.
+        """Factor loadings for one date or a date range. Loadings are
+        unitless.
 
         Args:
             as_of: ``date``, ``datetime``, ``'YYYY-MM-DD'``, or
                 ``'latest'`` (the model's last COB in the store).
+            start: Range mode — loadings for every COB in [start, end]
+                instead of one date. Same leniency as ``as_of``.
+            end: Range end; None with ``start`` given = 'latest'.
             assets: Internal int ids, or vendor id strings resolved via
                 asset_xref. None = all covered assets.
             sec_id_type: Pin the vendor scheme of ``assets``
@@ -176,24 +216,80 @@ class ModelFacade:
         Raises:
             ValueError: Unknown security id or factor id.
         """
-        cob = self._as_date(as_of)
+        lo, hi = self._range(as_of, start, end)
         ids = self._resolve_assets(assets, sec_id_type)
-        long = self.cache.get(
-            "factor_loading", cob, cob, ids,
-            lambda: self._model.factor_loadings(cob, assets=ids, factors=factors))
-        if factors is not None:                       # cache holds all factors
-            long = long.filter(pl.col(FACTOR_ID).is_in(list(factors)))
+        long = self._loadings_long(lo, hi, ids, factors)
         if not wide:
             return self._out(long)
-        cols = factors if factors is not None else self.factors
-        seen = set(long[FACTOR_ID].to_list())
-        present = [c for c in cols if c in seen]
-        wide = long.pivot(FACTOR_ID, index=[COB_DATE, ASSET_ID], values=VALUE)
-        # fill only the factor columns: a frame-level fill_null(0.0) would
-        # upcast the integer asset_id column to float
-        return self._out(wide.with_columns(pl.col(present).fill_null(0.0))
-                         .sort(ASSET_ID)
-                         .select([COB_DATE, ASSET_ID, *present]))
+        return self._out(self._loadings_wide(long, factors))
+
+    def get_security_panel(self, start="latest", end=None, securities=None, *,
+                           sec_id_type=None,
+                           fields=("loadings", "specific_risk", "returns")):
+        """Loadings, specific risk, and asset returns joined in one panel —
+        one call instead of three queries and a hand-rolled merge.
+
+        One row per (cob_date, asset_id): the factor columns in factor_seq
+        order (when 'loadings' is requested), ``specific_risk`` in canonical
+        annualized decimal vol, ``return`` in canonical daily decimal. A leg
+        with no data for a (date, asset) leaves nulls rather than dropping
+        the row.
+
+        Args:
+            start: First COB date (leniency as elsewhere); default
+                'latest' = a one-date panel.
+            end: Last COB date; None = same as ``start`` (or 'latest'
+                when ``start`` is a range start).
+            securities: Internal int ids or vendor id strings; None = all
+                covered assets.
+            sec_id_type: Vendor scheme of ``securities``; omit to
+                auto-detect.
+            fields: Which legs to include, any subset of
+                ``("loadings", "specific_risk", "returns")``.
+
+        Returns:
+            Frame in the facade's ``output`` library.
+
+        Raises:
+            ValueError: Unknown field name, security id, or empty fields.
+        """
+        known = ("loadings", "specific_risk", "returns")
+        bad = [f for f in fields if f not in known]
+        if bad or not fields:
+            raise ValueError(f"fields must be a non-empty subset of {known}, "
+                             f"got {tuple(fields)!r}")
+        lo = self._as_date(start, "start")
+        hi = self._as_date(end, "end") if end is not None else lo
+        ids = self._resolve_assets(securities, sec_id_type)
+
+        legs: list[pl.DataFrame] = []
+        if "loadings" in fields:
+            legs.append(self._loadings_wide(
+                self._loadings_long(lo, hi, ids, None), None))
+        if "specific_risk" in fields:
+            srisk = self.cache.get(
+                "specific_risk", lo, hi, ids,
+                lambda: self._model.specific_risk_history(lo, hi, assets=ids))
+            legs.append(self._scale(srisk, "specific_risk",
+                                    self._model.conventions
+                                    ["specific_risk_convention"])
+                        .select(COB_DATE, ASSET_ID,
+                                pl.col(VALUE).alias("specific_risk")))
+        if "returns" in fields:
+            rets = self.cache.get(
+                "asset_return", lo, hi, ids,
+                lambda: self._model.asset_returns(lo, hi, assets=ids))
+            legs.append(self._scale(rets, "return",
+                                    self._model.conventions
+                                    ["return_convention"])
+                        .select(COB_DATE, ASSET_ID,
+                                pl.col(VALUE).alias("return")))
+
+        panel = legs[0]
+        for leg in legs[1:]:
+            panel = panel.join(leg, on=[COB_DATE, ASSET_ID],
+                               how="full", coalesce=True)
+        return self._out(panel.sort(COB_DATE, ASSET_ID))
 
     def get_specific_risk(self, as_of="latest", *, assets=None,
                           sec_id_type=None):

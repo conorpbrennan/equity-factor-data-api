@@ -516,6 +516,46 @@ def check_t0_estimates(root):
         assert "no" in str(e) and "type" in str(e)
 
 
+def check_panel_and_history(root):
+    """Deck-alignment conveniences (2026-07-15): get_factor_loadings grows
+    a range mode (start=/end=, through the same cache path, wide or long),
+    and get_security_panel joins loadings + specific risk + asset returns
+    into one (cob_date, asset_id) panel — canonical units, one call instead
+    of three queries and a hand-rolled merge; fields= selects the legs."""
+    fac = ModelFacade.load(MID, str(root), output="polars")
+    hist = fac.get_factor_loadings(start=DATES[0], end=DATES[-1],
+                                   assets=[1, 2])
+    assert hist.height == len(DATES) * 2
+    assert hist.columns == ["cob_date", "asset_id", *FACTORS]
+    first = hist.filter((pl.col("cob_date") == DATES[0])
+                        & (pl.col("asset_id") == 2))
+    assert first["MT_MOMENTUM"][0] == loading_value(2, 1, 0)
+    long = fac.get_factor_loadings(start=DATES[0], assets=[1], wide=False)
+    assert long["cob_date"].n_unique() == len(DATES)   # end defaults latest
+
+    panel = fac.get_security_panel(DATES[0], DATES[-1], securities=[1, 2])
+    assert panel.height == len(DATES) * 2
+    assert panel.columns == ["cob_date", "asset_id", *FACTORS,
+                             "specific_risk", "return"]
+    row = panel.filter((pl.col("cob_date") == DATES[-1])
+                       & (pl.col("asset_id") == 1))
+    assert abs(row["specific_risk"][0] - 0.29) < 1e-12    # 29.0 ann_vol_pct
+    assert abs(row["return"][0] - 0.00575) < 1e-12        # 0.575 daily_pct
+    assert row["MT_MOMENTUM"][0] == loading_value(1, 1, len(DATES) - 1)
+
+    sr = fac.get_security_panel(DATES[-1], securities=["AX0000001"],
+                                fields=("specific_risk",))
+    assert sr.columns == ["cob_date", "asset_id", "specific_risk"]
+    assert sr.height == 1                                 # vendor ids work
+    latest = fac.get_security_panel()                     # one-date default
+    assert latest.height == 6
+    try:
+        fac.get_security_panel(DATES[-1], fields=("loadings", "vol"))
+        raise AssertionError("unknown panel field accepted")
+    except ValueError:
+        pass
+
+
 def check_cache_prewarm(root):
     """The opt-in pre-warm working-set design. Caching is OFF by default —
     a facade built without cache= never retains anything and warm() refuses
@@ -733,6 +773,7 @@ CHECKS = [
     ("facade: vendor ids via asset_xref (explicit + detected)", check_facade_identifiers),
     ("facade: canonical units (srisk, returns, covariance)", check_facade_units),
     ("facade: T0 estimate stream via the type column", check_t0_estimates),
+    ("facade: security panel + date-range loadings", check_panel_and_history),
     ("facade: cache off by default; opt-in pre-warm serves covered subsets", check_cache_prewarm),
     ("facade: cache persists to parquet, reloads across sessions", check_cache_persistence),
     ("facade: from_cache cold-starts offline, zero store contact", check_from_cache_offline),
