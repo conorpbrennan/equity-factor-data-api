@@ -1,10 +1,11 @@
 """Canonical risk-profile representation (PAS requirement, 2026-07-15).
 
 A risk profile is an arbitrary combination of factor exposures and
-specific-risk positions — a unit exposure to VALUE plus the specific risk
-of one name, say. It is not representable as a basket of securities and
-cannot be traded, but it is a meaningful unit of analysis: portfolios
-decompose into profiles along dimensions whose parts are not portfolios.
+specific-risk positions — any loadings in any mix (2.3 of VALUE, short
+0.7 of momentum, the specific risk of one name), not just unit exposures.
+It is not representable as a basket of securities and cannot be traded,
+but it is a meaningful unit of analysis: portfolios decompose into
+profiles along dimensions whose parts are not portfolios.
 
 Technically it is the object a portfolio becomes after the first step of
 every analytic — computing exposures — made canonical and passable, so the

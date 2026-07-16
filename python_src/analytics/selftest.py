@@ -215,6 +215,14 @@ def check_risk_profile(root):
     flash = pnl_decomposition(core, unit, start=DATES[-1], estimates=True)
     assert abs(flash["pnl"][0] - 0.006) < 1e-12              # flash
 
+    # arbitrary loadings in any mix — profiles are not unit-exposure-only
+    mix = RiskProfile.from_exposures("mix", DATES[-1],
+                                     {"VALUE": 2.5, "MARKET": -3.0})
+    pm = pnl_decomposition(core, mix, start=DATES[-1])
+    got_mix = dict(zip(pm["factor_id"], pm["pnl"]))
+    assert abs(got_mix["VALUE"] - 2.5 * 0.005) < 1e-12
+    assert abs(got_mix["MARKET"] - -3.0 * 0.005) < 1e-12
+
     # arithmetic: hedge the unit exposure out of the book's profile
     hedged = prof - unit
     got = dict(zip(hedged.exposures["factor_id"],

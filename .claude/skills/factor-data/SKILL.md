@@ -95,12 +95,15 @@ estimate_factor_returns(fac, date(2025, 1, 15))   # T0 estimation itself:
 
 from analytics import RiskProfile                 # exposures + specific risk
 prof = RiskProfile.from_portfolio(fac, book)      # as a first-class scope
-unit = RiskProfile.from_exposures("u", date(2025, 1, 15), {"VALUE": 1.0})
-pnl_decomposition(fac, prof - unit, start=date(2025, 1, 15))  # hedged book
+tilt = RiskProfile.from_exposures(                # any loadings, any mix —
+    "tilt", date(2025, 1, 15),                    # not just unit exposures
+    {"VALUE": 2.3, "MT_MOMENTUM": -0.7, "MARKET": 5.0},
+    specific={1: 1.5})                            # + specific risk of asset 1
+pnl_decomposition(fac, prof - tilt, start=date(2025, 1, 15))  # hedged book
 
 from analytics import volatility                  # x'Σx + specific leg
 volatility(fac, book)     # (component, variance, vol): factor/specific/total
-volatility(fac, prof)     # $mm annualized; works on either scope
+volatility(fac, tilt)     # $mm annualized; works on either scope
 ```
 
 For batch work ("run analytics for all my books and persist the results"),
