@@ -788,23 +788,40 @@ def check_cache_persistence(root):
             a.cache.frames["factor_loading"])           # lossless round trip
         b.load_cache(as_of=DATES[-1])                   # pinned date works too
 
-        # TTL: a set saved >1 day ago refuses by default, loads on opt-out
+        # TTL: a stale set is DISMISSED, not raised (Chris, 2026-07-20 —
+        # "the cache should just be dismissed and the data re-queried"):
+        # the facade warns, starts with an empty cache, and the next
+        # request falls through to the store; opt-out adopts it knowingly
         import json as _json
+        import warnings as _warnings
         mpath = saved_to / "manifest.json"
         m = _json.loads(mpath.read_text())
         m["meta"]["saved_at"] = "2020-01-01T00:00:00+00:00"
         mpath.write_text(_json.dumps(m))
-        try:
-            b.load_cache()
-            raise AssertionError("stale working set accepted")
-        except ValueError as e:
-            assert "TTL" in str(e)
-        b.load_cache(max_age_days=None)                 # explicit opt-out
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            res = b.load_cache()
+        assert res["adopted"] is False and "old" in res["dismissed"]
+        assert any("dismissed" in str(w.message) for w in caught)
+        assert isinstance(b.cache, UserCache) and b.cache.frames == {}
+        requeried = b.get_factor_loadings("2025-01-10", assets=[1, 2])
+        assert requeried.height == 2                    # re-queried, correct
+        assert b.cache.stats["misses"] == 1             # ...from the store
+        res = b.load_cache(max_age_days=None)           # explicit opt-out
+        assert res["adopted"] is True
 
+        # a model with no saved set: also dismissed, not an error — but an
+        # EXPLICIT path (caller error) and a set saved for a different
+        # model still raise
         other = ModelFacade.load("BARRA_TEST1_L", str(root), output="polars")
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            res = other.load_cache()                    # no set: starts empty
+        assert res["adopted"] is False and res["dismissed"] == "missing"
+        assert isinstance(other.cache, UserCache)
         try:
-            other.load_cache()                          # no set for its model
-            raise AssertionError("found a set for a model never saved")
+            other.load_cache(path=Path(root) / "nowhere")
+            raise AssertionError("explicit missing path accepted")
         except FileNotFoundError:
             pass
         try:
@@ -821,7 +838,12 @@ def check_from_cache_offline(root):
     dimension tables next to the facts, and from_cache() rebuilds a working
     facade from disk alone — no store connection is opened for dims, vendor
     id resolution, 'latest' (frozen to the set's as-of date), or any covered
-    request. Only a request outside coverage may fall through."""
+    request. Only a request outside coverage may fall through.
+
+    Staleness at the offline boundary: with a store reachable, a stale set
+    is dismissed and the session starts store-backed with an empty cache
+    (same contract as load_cache); genuinely offline there is nothing to
+    re-query, so a stale set raises unless max_age_days=None accepts it."""
     os.environ["FACTOR_CACHE_DIR"] = str(Path(root) / "offlinebase")
     try:
         a = ModelFacade.load(MID, str(root), output="polars",
@@ -847,9 +869,38 @@ def check_from_cache_offline(root):
             c = ModelFacade.from_cache(MID, output="polars")
             c.get_factor_returns(DATES[0], DATES[-1])
             assert c.cache.stats["hits"] == 1
+
+            # stale set, genuinely offline: nothing to re-query → raises;
+            # max_age_days=None knowingly accepts the old set
+            import json as _json
+            import warnings as _warnings
+            mpath = saved / "manifest.json"
+            m = _json.loads(mpath.read_text())
+            m["meta"]["saved_at"] = "2020-01-01T00:00:00+00:00"
+            mpath.write_text(_json.dumps(m))
+            try:
+                ModelFacade.from_cache(MID, output="polars")
+                raise AssertionError("stale set accepted offline")
+            except ValueError as e:
+                assert "no store" in str(e)
+            d = ModelFacade.from_cache(MID, output="polars",
+                                       max_age_days=None)
+            d.get_factor_returns(DATES[0], DATES[-1])
+            assert d.cache.stats["hits"] == 1
         finally:
             if prior is not None:
                 os.environ["FACTOR_STORE_ROOT"] = prior
+
+        # stale set with a store reachable: dismissed — the session starts
+        # store-backed with an empty cache and rebuilds on demand
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            e_fac = ModelFacade.from_cache(MID, str(root), output="polars")
+        assert any("dismissed" in str(w.message) for w in caught)
+        assert e_fac.cache.frames == {}                  # empty, store-backed
+        out = e_fac.get_factor_loadings("latest", assets=[1])
+        assert out["asset_id"].to_list() == [1]          # re-queried
+        assert e_fac.cache.stats["misses"] == 1
     finally:
         del os.environ["FACTOR_CACHE_DIR"]
 
