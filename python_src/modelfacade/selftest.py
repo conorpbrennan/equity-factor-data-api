@@ -812,8 +812,14 @@ def check_cache_view_identity(root):
     full = w.get("ds", days[0], days[3], [1, 2, 3, 4], load)
     vfull = float(len(calls))
     assert full.height == 4 * 4                        # one row per cell
-    assert set(full["v"].to_list()) == {vfull}         # fresh rows won
     assert w.frames["ds"].height == 16                 # no stale leftovers
+    # the STORED copy of a previously-seeded cell is the fresh one: re-get
+    # a now-covered cell (a hit, served from the frame — no load) and its
+    # value is the full-load's, not the seed's
+    n = len(calls)
+    again = w.get("ds", days[0], days[0], [1], load)
+    assert len(calls) == n                             # served from cache
+    assert again["v"].to_list() == [vfull]             # fresh copy won
 
 
 def check_cache_persistence(root):
