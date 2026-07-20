@@ -30,6 +30,16 @@ miss falls through and the set is unchanged — serve only what was declared,
 for reproducible sessions and bounded memory. Coverage is therefore a list
 of segments per dataset: the warmed rectangle plus whatever extensions the
 session accreted.
+
+The cache identity includes the VIEW rows were loaded under: get()/put()
+take view="official" by default, and any other view — a T0-estimate
+stream, a PIT as-of — keys its own frames and coverage (dataset@view). A
+point-in-time answer can therefore never be served a later republication,
+and estimates can never be served as official: the identity requirement is
+structural, not a convention callers must remember. Merges dedupe per cell
+(cob_date / asset_id / factor_id) with freshly loaded rows winning, so a
+republication re-fetched by a full-load path replaces the stale row
+instead of sitting beside it.
 """
 
 from __future__ import annotations
@@ -42,7 +52,11 @@ from pathlib import Path
 
 import polars as pl
 
-from conventions import ASSET_ID, COB_DATE
+from conventions import ASSET_ID, COB_DATE, FACTOR_ID
+
+# the default view: latest official data. Any other view (estimate stream,
+# PIT as-of) keys its own frames — see the module docstring.
+OFFICIAL_VIEW = "official"
 
 
 class CacheBehaviour(Enum):
@@ -74,7 +88,8 @@ class NoCache:
 
     def get(self, dataset: str, start: date, end: date,
             assets: list[int] | None, loader,
-            extendable: bool = True) -> pl.DataFrame:
+            extendable: bool = True,
+            view: str = OFFICIAL_VIEW) -> pl.DataFrame:
         return loader(start, end, assets)
 
     def put(self, dataset: str, frame: pl.DataFrame, cov: Coverage) -> None:
@@ -104,11 +119,21 @@ class UserCache:
     hits: int = 0
     misses: int = 0
 
-    def put(self, dataset: str, frame: pl.DataFrame, cov: Coverage) -> None:
-        """Declare `frame` as the dataset's working set — replaces any prior
-        segments (a warm() resets the dataset, extensions included)."""
-        self.frames[dataset] = frame
-        self.coverage[dataset] = [cov]
+    @staticmethod
+    def _key(dataset: str, view: str) -> str:
+        """The identity a frame is stored under. The official view keeps the
+        bare dataset name (zero churn for the default path); any other view
+        gets its own key — frames from different views can never mix."""
+        return dataset if view == OFFICIAL_VIEW else f"{dataset}@{view}"
+
+    def put(self, dataset: str, frame: pl.DataFrame, cov: Coverage,
+            view: str = OFFICIAL_VIEW) -> None:
+        """Declare `frame` as the dataset's working set for `view` —
+        replaces any prior segments (a warm() resets the dataset,
+        extensions included)."""
+        key = self._key(dataset, view)
+        self.frames[key] = frame
+        self.coverage[key] = [cov]
 
     @staticmethod
     def _scope_covers(seg_assets: frozenset[int] | None,
@@ -124,17 +149,19 @@ class UserCache:
                 and cls._scope_covers(cov.assets, assets))
 
     def covers(self, dataset: str, start: date, end: date,
-               assets: list[int] | None) -> bool:
-        """True when the request fits entirely inside a single segment.
-        Deliberately conservative: a request spanning two disjoint segments
-        misses, gets loaded in full, and the merge coalesces the segments —
-        self-healing rather than clever."""
+               assets: list[int] | None,
+               view: str = OFFICIAL_VIEW) -> bool:
+        """True when the request fits entirely inside a single segment of
+        the given view. Deliberately conservative: a request spanning two
+        disjoint segments misses, gets loaded in full, and the merge
+        coalesces the segments — self-healing rather than clever."""
         return any(self._seg_covers(c, start, end, assets)
-                   for c in self.coverage.get(dataset, []))
+                   for c in self.coverage.get(self._key(dataset, view), []))
 
     def get(self, dataset: str, start: date, end: date,
             assets: list[int] | None, loader,
-            extendable: bool = True) -> pl.DataFrame:
+            extendable: bool = True,
+            view: str = OFFICIAL_VIEW) -> pl.DataFrame:
         """Serve from the working set when covered, else call loader.
 
         Args:
@@ -151,6 +178,9 @@ class UserCache:
                 cache-shaped rows (e.g. factor-filtered) — it is served
                 from coverage when possible but its result is never merged
                 into the set.
+            view: The publication view the request is for — part of the
+                cache identity. A request for one view is never served
+                another view's rows; each view extends its own frames.
 
         Returns:
             The covered slice of the working set, or the loaded rows.
@@ -165,26 +195,27 @@ class UserCache:
             cost more than one slightly-fat one. Under STRICT the set is
             never mutated and a miss loads the full request.
         """
+        key = self._key(dataset, view)
         extend = extendable and self.behaviour is CacheBehaviour.EXTEND
-        if dataset in self.frames:
+        if key in self.frames:
             if assets is None:
-                gaps = self._date_gaps(dataset, start, end, None)
+                gaps = self._date_gaps(key, start, end, None)
                 if not gaps:                 # covered by the segment union
                     self.hits += 1
-                    return self._serve(dataset, start, end, assets)
+                    return self._serve(key, start, end, assets)
                 if extend and gaps != [(start, end)]:
                     self.misses += 1
                     for gs, ge in gaps:      # fetch only the missing days
-                        self._extend(dataset, loader(gs, ge, None),
+                        self._extend(key, loader(gs, ge, None),
                                      Coverage(gs, ge, None))
-                    return self._serve(dataset, start, end, assets)
+                    return self._serve(key, start, end, assets)
             else:
-                missing = {a: tuple(self._date_gaps(dataset, start, end, [a]))
+                missing = {a: tuple(self._date_gaps(key, start, end, [a]))
                            for a in assets}
                 missing = {a: g for a, g in missing.items() if g}
                 if not missing:              # every asset fully covered
                     self.hits += 1
-                    return self._serve(dataset, start, end, assets)
+                    return self._serve(key, start, end, assets)
                 # group missing assets by their gap ranges: one fetch per
                 # group's gaps, so only truly missing cells travel. Covers
                 # pure date extension (every asset missing the same days),
@@ -199,14 +230,14 @@ class UserCache:
                     for sig, ms in groups.items():
                         ms = sorted(ms)
                         for gs, ge in sig:
-                            self._extend(dataset, loader(gs, ge, ms),
+                            self._extend(key, loader(gs, ge, ms),
                                          Coverage(gs, ge, frozenset(ms)))
-                    return self._serve(dataset, start, end, assets)
+                    return self._serve(key, start, end, assets)
         self.misses += 1
         result = loader(start, end, assets)
         if extend:
             scope = None if assets is None else frozenset(assets)
-            self._extend(dataset, result, Coverage(start, end, scope))
+            self._extend(key, result, Coverage(start, end, scope))
         return result
 
     def _serve(self, dataset: str, start: date, end: date,
@@ -259,9 +290,17 @@ class UserCache:
             self.frames[dataset] = frame
             self.coverage[dataset] = [new]
             return
-        self.frames[dataset] = (
-            pl.concat([self.frames[dataset], frame], how="vertical_relaxed")
-            .unique(maintain_order=True))
+        merged = pl.concat([self.frames[dataset], frame],
+                           how="vertical_relaxed")
+        # one row per cell, freshly loaded rows winning: a republication
+        # re-fetched by a full-load path replaces the stale row instead of
+        # sitting beside it (values may differ; full-row dedupe would keep
+        # both)
+        cell = [c for c in (COB_DATE, ASSET_ID, FACTOR_ID)
+                if c in merged.columns]
+        self.frames[dataset] = merged.unique(subset=cell or None,
+                                             keep="last",
+                                             maintain_order=True)
         remaining = []
         for seg in self.coverage[dataset]:
             if self._mergeable(seg, new):

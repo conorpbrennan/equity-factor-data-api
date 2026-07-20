@@ -754,6 +754,68 @@ def check_cache_extend(root):
     assert again.equals(first)                             # same answer either way
 
 
+def check_cache_view_identity(root):
+    """The cache identity includes the VIEW rows were loaded under —
+    official vs a T0-estimate or PIT stream — closing the caching-design
+    gap structurally: each view keys its own frames and coverage
+    (dataset@view), so a point-in-time answer can never be served a later
+    republication and estimates can never be served as official, no matter
+    what a caller forgets. Also: merges dedupe per cell
+    (cob_date/asset_id/factor_id) with freshly loaded rows winning, so a
+    republication re-fetched by a full-load path replaces the stale row
+    instead of sitting beside it."""
+    from conventions import ASSET_ID, COB_DATE
+
+    days = [date(2025, 3, 1) + timedelta(days=i) for i in range(4)]
+    calls: list = []
+
+    def load(s, e, a):
+        calls.append((s, e, tuple(sorted(a))))
+        v = float(len(calls))                # each load returns new values
+        return pl.DataFrame(
+            [{COB_DATE: dy, ASSET_ID: x, "v": v}
+             for dy in days if s <= dy <= e for x in sorted(a)])
+
+    cache = UserCache()
+    cache.put("ds",
+              pl.DataFrame([{COB_DATE: dy, ASSET_ID: 1, "v": 0.0}
+                            for dy in days]),
+              Coverage(days[0], days[-1], frozenset({1})))
+
+    # same dates, same assets, different view → structurally a miss: the
+    # official frame is never served for an estimate request, and the
+    # estimate rows key separately
+    est = cache.get("ds", days[0], days[-1], [1], load, view="t0_estimate")
+    assert len(calls) == 1 and est["v"].to_list() == [1.0] * 4
+    assert set(cache.stats["rows"]) == {"ds", "ds@t0_estimate"}
+
+    # each view serves its own frames — both are hits now, values distinct
+    off = cache.get("ds", days[0], days[-1], [1], load)
+    assert len(calls) == 1 and off["v"].to_list() == [0.0] * 4
+    est2 = cache.get("ds", days[0], days[-1], [1], load, view="t0_estimate")
+    assert len(calls) == 1 and est2["v"].to_list() == [1.0] * 4
+
+    # persistence round-trips both views
+    with tempfile.TemporaryDirectory() as td:
+        cache.to_disk(td)
+        back, _ = UserCache.from_disk(td)
+    assert set(back.frames) == {"ds", "ds@t0_estimate"}
+    assert back.get("ds", days[0], days[0], [1], load)["v"].to_list() == [0.0]
+
+    # per-cell dedupe, fresh-wins: three assets with three histories plus a
+    # fourth force the beyond-cap full load, which overlaps the seeded
+    # cells with NEW values — the fresh rows replace the stale ones
+    w = UserCache()
+    w.get("ds", days[0], days[0], [1], load)
+    w.get("ds", days[1], days[1], [2], load)
+    w.get("ds", days[2], days[2], [3], load)
+    full = w.get("ds", days[0], days[3], [1, 2, 3, 4], load)
+    vfull = float(len(calls))
+    assert full.height == 4 * 4                        # one row per cell
+    assert set(full["v"].to_list()) == {vfull}         # fresh rows won
+    assert w.frames["ds"].height == 16                 # no stale leftovers
+
+
 def check_cache_persistence(root):
     """Cross-session reuse with the keyed layout: the cache key is
     (as-of COB date, model_id) -> <base>/usercache/<as_of>/<model_id>/.
@@ -986,6 +1048,7 @@ CHECKS = [
     ("facade: security panel + date-range loadings", check_panel_and_history),
     ("facade: cache off by default; opt-in pre-warm serves covered subsets", check_cache_prewarm),
     ("facade: cache extend-on-demand merges misses into the working set", check_cache_extend),
+    ("cache: view identity (official vs estimate) + per-cell fresh-wins dedupe", check_cache_view_identity),
     ("facade: cache persists to parquet, reloads across sessions", check_cache_persistence),
     ("facade: from_cache cold-starts offline, zero store contact", check_from_cache_offline),
     ("inventory: static model inventory matches ids and store schema", check_inventory),

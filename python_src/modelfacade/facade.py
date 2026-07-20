@@ -343,6 +343,10 @@ class ModelFacade:
         lo = self._as_date(start, "start") if start else self._as_date("latest")
         hi = self._as_date(end, "end") if end else lo
         if estimates:
+            # estimates bypass the cache (their value is freshness). If
+            # they are ever cached, they must carry view="t0_estimate" —
+            # the cache keys frames per view, so they could never be
+            # served as official either way.
             raw = self._model.factor_returns(lo, hi, factors=factors,
                                              pub_type=T0_ESTIMATE)
         else:

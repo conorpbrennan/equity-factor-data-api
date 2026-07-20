@@ -51,6 +51,13 @@ explicit conversion between them.
   load beyond `MAX_FETCH_GROUPS` distinct groups (round trips have fixed
   latency); `UserCache(behaviour=CacheBehaviour.STRICT)` serves only
   declared coverage and never mutates the set on a miss
+- **view identity**: the cache key includes the publication view
+  (`view="official"` by default; an estimate or PIT view keys its own
+  frames as `dataset@view`), so a PIT answer can never be served a later
+  republication and estimates can never be served as official — the
+  identity requirement from the caching design doc, structural rather
+  than by convention. Merges dedupe per cell with freshly loaded rows
+  winning
 - working-set **persistence**: `save_cache()` / `load_cache()` write the
   warmed frames as parquet + a coverage manifest, keyed by
   (as-of date, model_id) under `<temp>/usercache/<as_of>/<model_id>/`
