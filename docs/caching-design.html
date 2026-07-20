@@ -122,7 +122,8 @@
     means <strong>only the missing cells travel</strong>: extending a warmed range by a week loads
     a week; asking about the warmed book plus two new names loads the two names (missing assets
     are grouped by their gap ranges — one fetch per group, degrading to one full-request load
-    beyond a small cap, because round trips have fixed latency). The cache identity also carries
+    beyond a small cap, because round trips have fixed latency; mechanics and test backing in
+    §1.5). The cache identity also carries
     the <strong>publication view</strong> (<span class="mono">view="official"</span> by default;
     any other view keys its own frames as <span class="mono">dataset@view</span>) — see the
     resolved callout below.
@@ -241,6 +242,64 @@ cache.clear()                              # known restatement: drop the set, re
     replayable without it.</p>
   </div>
 
+  <h3>1.5 &nbsp;Extending the working set is non-trivial — the approach, and its test backing</h3>
+  <p>
+    Merging a miss into the set sounds like an append; it is not. A working set's coverage is a
+    <strong>claim</strong> — every cell inside it is complete — and extension must grow the claim
+    without ever over-claiming, because the failure mode of an over-claim is a fast, silently
+    wrong answer. Three things make it genuinely subtle: coverage is
+    <strong>two-dimensional</strong> (dates × assets), so growing a single rectangle would claim
+    cells that were never fetched; a re-fetched cell may have been restated intra-day, so naive
+    row dedupe keeps both copies; and fetch granularity is a real trade — redundant transfer on
+    one side, store round trips with fixed latency on the other.
+  </p>
+  <p>
+    The approach is one rule applied per request. Compute each requested asset's missing date
+    ranges (its <em>gaps</em>) against the union of segments whose scope covers that asset;
+    group the missing assets by identical gap signature; issue <strong>one fetch per group per
+    gap</strong>, so only truly missing cells travel; and degrade to a single full-request load
+    when the number of distinct signatures exceeds a small cap (many tiny queries cost more
+    wall-clock than one slightly-fat one). The three extension shapes all fall out of that rule:
+  </p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>case</th><th class="l">shape</th><th class="l">example</th><th class="l">what hits the store</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td class="l">new dates, warmed assets</td>
+          <td class="l">warm days 0–3 × {1,2}; ask days 2–6</td>
+          <td class="l">days 4–6 × {1,2} — the three missing days</td></tr>
+      <tr><td>2</td><td class="l">new assets, covered dates (book + adds)</td>
+          <td class="l">warm {1,2}; ask {1,2,7}, same dates</td>
+          <td class="l">requested range × {7} — the adds only</td></tr>
+      <tr><td>3a</td><td class="l">both, gaps aligned</td>
+          <td class="l">ask days 10–11 × {1,2,9}, all missing those days</td>
+          <td class="l">days 10–11 × {1,2,9} — one fetch</td></tr>
+      <tr><td>3b</td><td class="l">both, gaps misaligned</td>
+          <td class="l">7 missing days 6–11; 9 missing days 6–9</td>
+          <td class="l">one fetch per group; beyond the cap, one full-request load</td></tr>
+    </tbody>
+  </table></div>
+  <p>
+    The bookkeeping invariants that keep the claim honest: rows enter the frame only paired with
+    a <span class="mono">Coverage</span> segment recording exactly what was fetched; an answer is
+    served from the merged frame only when every requested cell is covered; same-scope segments
+    that overlap or touch coalesce, and a request spanning disjoint segments fetches the inner
+    gap and heals coverage back to one rectangle. Merges dedupe per cell with freshly loaded
+    rows winning (§1.4), and factor-filtered loads are marked non-extendable — the cache holds
+    all factors, so a filtered result is not cache-shaped and is served from coverage but never
+    merged.
+  </p>
+  <p>
+    <strong>All of it is pinned by tests, at the level of exact store traffic.</strong> The
+    selftest drives the cache with a stub loader that records the precise (dates × assets) of
+    every store call, and asserts the fetch shapes in the table literally: the three-day gap
+    fetch, the adds-only fetch, the aligned single fetch, the per-group fetches, and the
+    beyond-cap full load. Around those: every repeat request after an extension is a hit with
+    zero store calls; row counts prove exact deduplication; STRICT never gap-fetches or mutates
+    the set; a re-read of a re-fetched cell returns the fresh copy, not the stale one; and
+    cross-view requests are structural misses. The suite runs against a fabricated micro store,
+    so the assertions are exact numbers, not tolerances.
+  </p>
+
   <h2><span class="sect">2</span>The numbers — why a cache, and why a working set</h2>
   <p>
     The 20-year, twelve-model store is <strong>680&nbsp;GB</strong>; an interactive working set is
@@ -322,7 +381,7 @@ cache.clear()                              # known restatement: drop the set, re
     <li><strong>Date-range requests fetch only the missing days and merge them in.</strong>
         <em>Implemented as extend-on-demand (CacheBehaviour.EXTEND, the default), and further
         than asked: gap-only fetches on both axes — missing days AND missing assets, grouped by
-        gap signature. Chris was right to push back on an earlier draft's claim that the
+        gap signature (approach and tests: §1.5). Chris was right to push back on an earlier draft's claim that the
         short-lived philosophy weakened the case for this: lifetime (wipe daily) and
         intra-day mutability (extend on demand) are independent axes, and they compose.</em></li>
   </ul>
