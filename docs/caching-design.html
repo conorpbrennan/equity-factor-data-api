@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Caching — working sets today, record &amp; playback next</title>
+<style>
+  /* Single light theme: paper ground, dark ink, one blue accent. */
+  :root {
+    --surface: #fffffe; --ink: #1c2126; --ink-2: #43494f; --ink-3: #7d838a;
+    --hairline: #e6e7e9; --bar: #61676e; --accent: #3b6ea5;
+  }
+  body { background: var(--surface); color: var(--ink); margin: 0;
+         padding: 3.5rem 1.5rem 4rem;
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; }
+  main { max-width: 1000px; margin: 0 auto; }
+  .eyebrow { font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+             color: var(--ink-3); margin: 0 0 .6rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  h1 { font-size: 1.55rem; font-weight: 650; margin: 0 0 .45rem; text-wrap: balance; }
+  h2 { font-size: 1.08rem; font-weight: 650; margin: 3.2rem 0 .3rem; }
+  h2 .sect { color: var(--ink-3); font-weight: 500; margin-right: .5rem; }
+  h3 { font-size: .9rem; font-weight: 650; margin: 1.6rem 0 .3rem; }
+  p { color: var(--ink-2); max-width: 74ch; }
+  ul { color: var(--ink-2); max-width: 74ch; padding-left: 1.2rem; }
+  li { margin: .25rem 0; }
+  .key { color: var(--accent); font-weight: 600; }
+
+  .tablewrap { overflow-x: auto; margin: 1rem 0 .4rem; }
+  table { border-collapse: collapse; font-size: .8rem; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: .32rem 1rem .32rem 0; white-space: nowrap; }
+  thead th { color: var(--ink-3); font-weight: 500; font-size: .7rem; letter-spacing: .06em;
+             text-transform: uppercase; border-bottom: 1px solid var(--hairline); }
+  th:first-child, td:first-child { text-align: left; }
+  th.l, td.l { text-align: left; white-space: normal; }
+  td { color: var(--ink-2); border-bottom: 1px solid var(--hairline); }
+  td:first-child { color: var(--ink); }
+  td.good { color: var(--accent); font-weight: 600; }
+
+  pre { font: .76rem/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: var(--ink-2); margin: .8rem 0; padding: 0 0 0 1rem;
+        border-left: 2px solid var(--hairline); overflow-x: auto; }
+  .note { font-size: .76rem; color: var(--ink-3); max-width: 78ch; margin: .3rem 0 0; }
+  .callout { border-left: 3px solid var(--accent); padding: .1rem 0 .1rem 1rem;
+             margin: 1.4rem 0; max-width: 74ch; }
+  .callout p { margin: .4rem 0; font-size: .85rem; }
+  .callout .h { font-weight: 650; color: var(--ink); }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 3rem; }
+  footer { margin-top: 3.2rem; font-size: .78rem; color: var(--ink-2); max-width: 78ch; }
+</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Equity factor data API · Caching design · 2026-07-20</p>
+  <h1>Caching: the working set we have, the ideas on the table, and where record &amp; playback fits</h1>
+  <p>
+    This note does three things. It describes, in full, the caching that exists in the prototype
+    today and the measurements that motivate it (§1–§2). It records Chris's design input from the
+    14 July review email and subsequent discussion (§3). And it lays out a proposal that has not
+    been in the conversation yet: a <strong>record &amp; playback</strong> layer at the data-sourcing
+    boundary, where caching and <strong>regression testing</strong> turn out to be the same
+    mechanism (§4). §5 shows how the three shapes compose rather than compete, and §6 closes
+    with a recommendation on what to build next and what to defer.
+  </p>
+
+  <h2><span class="sect">1</span>What the prototype does today — a working-set cache</h2>
+  <p>
+    The prototype's cache (<span class="mono">python_src/modelfacade/cache.py</span>) is a
+    <strong>working-set cache, not query-result caching</strong>. The distinction drives everything:
+    rather than memoizing individual queries, the user declares a predictable working set once —
+    a date range and an asset list per dataset — and every subsequent request that falls inside
+    that coverage is answered from memory. Anything outside falls through to the loader untouched.
+  </p>
+
+  <h3>1.1 &nbsp;Layering — where the cache sits</h3>
+  <p>
+    Caching lives strictly at the facade layer, so leniency never leaks into core. The stack,
+    bottom-up:
+  </p>
+  <ul>
+    <li><span class="mono">DataSource</span> (<span class="mono">datasource.py</span>) — a
+        <span class="mono">@runtime_checkable</span> Protocol <em>owned by the core layer</em>.
+        Requests are semantic and model-agnostic — which fact, which dates, which assets — never
+        SQL, globs, or layout. Four methods: <span class="mono">dim()</span>,
+        <span class="mono">read_fact()</span>, <span class="mono">has_column()</span>,
+        <span class="mono">date_bounds()</span>.</li>
+    <li><span class="mono">Store</span> (<span class="mono">store.py</span>) — implements
+        <span class="mono">DataSource</span>; routes <span class="mono">s3://</span> roots to the
+        in-region query engine, scans locally otherwise.</li>
+    <li><span class="mono">Model</span> (<span class="mono">core.py</span>) — the strict core.
+        Takes a <span class="mono">DataSource</span>; never loads directly, never imports the
+        facade.</li>
+    <li><span class="mono">ModelFacade</span> (<span class="mono">facade.py</span>) — composes a
+        source, hands it to <span class="mono">Model</span>, and holds the cache. Every read
+        method wraps the core call in a loader lambda:
+        <span class="mono">self.cache.get(dataset, lo, hi, ids, loader)</span>.</li>
+  </ul>
+
+  <h3>1.2 &nbsp;The three classes</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>class</th><th class="l">role</th><th class="l">behaviour</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">Coverage</td><td class="l">declaration</td>
+          <td class="l">start, end, frozenset of assets (None = all) per dataset</td></tr>
+      <tr><td class="mono">NoCache</td><td class="l">the default</td>
+          <td class="l">get() always runs the loader; put() raises rather than silently no-op; stats all zero</td></tr>
+      <tr><td class="mono">UserCache</td><td class="l">the opt-in</td>
+          <td class="l">coverage test, filtered serve on hit, fall-through on miss, hit/miss counters, clear(), parquet persistence</td></tr>
+    </tbody>
+  </table></div>
+  <p>
+    <strong>Caching is off by default</strong> (settled 2026-07-15). The facade constructor does
+    <span class="mono">self.cache = cache if cache is not None else NoCache()</span> — the
+    speed-versus-staleness trade-off is always the caller's, never a default. The coverage test is
+    containment: the cached range must contain the requested range <em>and</em> the requested
+    assets must be a subset of covered assets. A hit filters the warmed frame by
+    <span class="mono">COB_DATE.is_between(start, end)</span> and asset membership; a miss runs the
+    loader in full.
+  </p>
+
+  <h3>1.3 &nbsp;Warm, persist, cold-start — the daily lifecycle</h3>
+  <pre>cache = UserCache()
+mf = ModelFacade.load("AX_WW4_MH", cache=cache)
+
+mf.warm(assets)          # YTD loadings + specific risk for the book,
+                         # all factor returns (official stream)
+mf.save_cache()          # parquet-per-dataset + manifest.json under
+                         # &lt;base&gt;/usercache/&lt;as_of&gt;/&lt;model_id&gt;/
+
+# next morning, or offline on the train:
+mf = ModelFacade.from_cache("AX_WW4_MH")   # never touches the store
+mf.load_cache(max_age_days=1.0)            # 1-day TTL, opt out with None
+cache.clear()                              # known restatement: drop the set, re-warm</pre>
+  <ul>
+    <li><span class="mono">warm(assets, as_of, sec_id_type)</span> loads year-to-date loadings and
+        specific risk for the given assets plus all factor returns; raises if the cache is a
+        <span class="mono">NoCache</span> — a warm with nowhere to live is a bug, not a no-op.</li>
+    <li><span class="mono">save_cache()</span> also persists the dimension tables
+        (model_master, factor_master, asset_xref), so a later session can rebuild the
+        <span class="mono">Model</span> with <em>no store at all</em>.</li>
+    <li><span class="mono">from_cache()</span> starts a session entirely from the persisted set —
+        offline cold start. <span class="mono">'latest'</span> resolves to the set's as-of date.</li>
+    <li>The <strong>1-day TTL</strong> (<span class="mono">max_age_days=1.0</span>) enforces the
+        morning re-warm cadence; <span class="mono">max_age_days=None</span> is the explicit
+        opt-out for knowingly using an older set.</li>
+    <li><span class="mono">clear()</span> invalidates the whole working set but keeps the session
+        hit/miss counters — the counters describe the session, not the set.</li>
+    <li><span class="mono">warm_cache.py</span> is the cron-ready morning job: repeatable
+        <span class="mono">--model</span>, a positions file, per-model isolation (one model failing
+        doesn't stop the rest).</li>
+    <li>T0 <strong>estimates bypass the cache entirely</strong>
+        (<span class="mono">get_factor_returns(estimates=True)</span>) — their whole value is
+        freshness.</li>
+    <li>Cache base is <span class="mono">$FACTOR_CACHE_DIR</span> or the system temp dir — temp by
+        default, so unconfigured working sets self-expire; set the env var to make them
+        persistent.</li>
+  </ul>
+
+  <h3>1.4 &nbsp;What the TTL is — and is not</h3>
+  <p>
+    The 1-day TTL is a <strong>staleness guard, not an incremental update</strong>. When
+    <span class="mono">save_cache()</span> writes a set, it stamps <span class="mono">saved_at</span>
+    (UTC) in <span class="mono">manifest.json</span>. When a later session adopts the set via
+    <span class="mono">load_cache()</span> or <span class="mono">from_cache()</span>, the facade
+    compares <span class="mono">now − saved_at</span> against
+    <span class="mono">max_age_days</span> and <strong>raises a
+    <span class="mono">ValueError</span></strong> if the set is older — it cannot silently hand
+    you Tuesday's data on Thursday. <span class="mono">max_age_days=None</span> skips the check
+    for when an older set is knowingly acceptable (offline for a few days with last Friday's
+    snapshot).
+  </p>
+  <p>
+    <strong>The next-day load does not extend the previous set by one day — the set is rebuilt
+    from scratch.</strong> The morning job calls <span class="mono">warm()</span> again, which
+    re-pulls the full working set from the store (YTD loadings and specific risk for the assets,
+    all factor returns), and <span class="mono">save_cache()</span> writes a fresh set under a
+    new as-of directory. Yesterday's set is simply abandoned. "1-day TTL + morning re-warm"
+    therefore means: every day gets a complete fresh snapshot, and the TTL only stops you
+    accidentally consuming a stale one. The cost is acceptable because the warm is a bulk
+    sequential pull — the cheap kind of query.
+  </p>
+  <p>
+    The incremental version — load yesterday's set, pull only the new COB date, extend coverage
+    by one day — is exactly Chris's <em>fetch-missing-days-and-merge</em> idea (§3.2), and it is
+    <strong>not built</strong>. It would make the morning job much cheaper, but note the
+    correctness trap it must clear first: <strong>an append-only warm never picks up
+    restatements to earlier dates</strong>, whereas the full daily rebuild gets them for free.
+    A delta-warm therefore needs the restatement story to be solid before it ships —
+    <span class="mono">as_of</span>/status in the cache key, and <span class="mono">clear()</span>
+    on known restatements as the escape hatch.
+  </p>
+
+  <div class="callout">
+    <p><span class="h">One known gap.</span>
+    The persisted-set path is keyed by (as-of date, model_id), but the in-memory key is dataset
+    name + coverage only — nothing in it records <em>which as-of view</em> a frame was loaded
+    under, or whether it is official data versus a T0 estimate. That is safe today only because a
+    cache instance ever holds one view: <span class="mono">warm()</span> loads latest-official,
+    and estimates bypass the cache entirely.</p>
+    <p><span class="h">Worked example of the failure.</span> Loadings for March&nbsp;15 are
+    restated by the vendor on April&nbsp;2. You warm on April&nbsp;10, so the cached frame holds
+    the <em>restated</em> March&nbsp;15 values — that is what "latest" means on April&nbsp;10.
+    Someone then asks the point-in-time question: <em>March&nbsp;15 loadings as known on
+    March&nbsp;20</em> (<span class="mono">as_of="2026-03-20"</span>). The cache checks its key:
+    dataset <span class="mono">"factor_loading"</span>? Yes. March&nbsp;15 inside the covered
+    range? Yes. <strong>Hit — and it serves the restated values</strong>, when the correct PIT
+    answer is the pre-restatement ones. Silently wrong, dressed as a fast success: the coverage
+    test cannot catch it, because the requested <em>date</em> genuinely is covered — what differs
+    is the as-of view, and that is not part of the key.</p>
+    <p><strong>The fix: make the view part of the identity.</strong> The cache key must grow
+    <span class="mono">as_of</span>/status the moment restatement queries are exposed — then the
+    PIT query above is a clean <em>miss</em> that falls through to the loader, which is the
+    correct behaviour. This is a firm requirement whichever cache design wins, because every
+    shape has the same hole if identity is incomplete: the working set's coverage key, the
+    decorator's <span class="mono">__cache_identity__</span> (Chris's proposal lists model, variant,
+    <span class="mono">as_of</span>, status explicitly), and the SHA-256 request hash in §4 — a
+    request is not fully specified without <span class="mono">as_of</span>, so it is not
+    replayable without it.</p>
+  </div>
+
+  <h2><span class="sect">2</span>The numbers — why a cache, and why a working set</h2>
+  <p>
+    The 20-year, twelve-model store is <strong>680&nbsp;GB</strong>; an interactive working set is
+    small. That asymmetry is the whole premise. The three-way storage benchmark
+    (AX_WW4_MH: 248 factors, 58,000 coverage assets, 302M wide rows) shows warmed local answers
+    are already sub-second — and the local-vs-AWS comparison shows what happens without a cache
+    when the data is remote.
+  </p>
+
+  <h3>2.1 &nbsp;Local store: warm answers are sub-second</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>query</th><th class="l">shape</th><th>cold p50 s</th><th>warm p50 s</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">CS1</td><td class="l">full cross-section, 1 date, all 249 cols</td><td>0.29</td><td class="good">0.18</td></tr>
+      <tr><td class="mono">CS2</td><td class="l">one date, 5 styles, estu only</td><td>0.13</td><td class="good">0.027</td></tr>
+      <tr><td class="mono">CS3</td><td class="l">risk-model pull (xs → cov → srisk)</td><td>0.28</td><td class="good">0.12</td></tr>
+      <tr><td class="mono">CS5</td><td class="l">as-of (PIT) cross-section, restated date</td><td>0.41</td><td class="good">0.30</td></tr>
+      <tr><td class="mono">TS1</td><td class="l">one asset, 20y, all factors</td><td>1.00</td><td class="good">0.075</td></tr>
+      <tr><td class="mono">TS4</td><td class="l">factor panel, estu × month-ends × 10y</td><td>9.23</td><td class="good">0.89</td></tr>
+      <tr><td class="mono">TS6</td><td class="l">as-of PIT single-asset history</td><td>1.11</td><td class="good">0.23</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Per-model wide layout (arm A), i7-12700K / 62&nbsp;GB / SATA SSD, DuckDB 40&nbsp;GB, 14 threads.
+  Cold = fresh process + page-cache eviction; warm = in-process repeats; p50 of the 12-query suite.</p>
+
+  <h3>2.2 &nbsp;Remote store: cold S3 from the dev box is the pain point</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>query · arm</th><th class="l">state</th><th>local nvme s</th><th>dev→s3 s</th><th>ratio</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">CS1 · wide_ts</td><td class="l">cold</td><td>0.32</td><td>46.7</td><td>144.7×</td></tr>
+      <tr><td class="mono">TS1 · wide_cs</td><td class="l">cold</td><td>0.35</td><td>56.0</td><td>158.8×</td></tr>
+      <tr><td class="mono">CS3 · wide_ts</td><td class="l">cold</td><td>0.34</td><td>49.6</td><td>145.2×</td></tr>
+      <tr><td class="mono">CS1 · wide_cs</td><td class="l">warm</td><td>0.015</td><td>0.52</td><td>34.6×</td></tr>
+      <tr><td class="mono">CS2 · wide_cs</td><td class="l">warm</td><td>0.011</td><td>0.81</td><td>73.3×</td></tr>
+      <tr><td class="mono">TS1 · wide_ts</td><td class="l">warm</td><td>0.019</td><td>0.31</td><td>16.5×</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Stage-4 comparison, p50 seconds. dev→s3 = dev box scanning S3 across the Atlantic. The in-region
+  query engine closes most of the gap for served queries (it roughly halves the end-to-end suite
+  versus laptop scans) — but a covered question answered from the local working set costs no
+  network at all, and an offline cold start costs no AWS at all.</p>
+
+  <div class="callout">
+    <p><span class="h">Reading of the numbers.</span> Cold trans-Atlantic scans are 145–159×
+    local NVMe. The working-set cache converts that class of query — the repeated, predictable,
+    book-shaped pulls that dominate an interactive session — into local sub-second answers, and
+    the persisted set makes the first session of the day warm too. The engine handles the
+    long tail the set doesn't cover.</p>
+  </div>
+
+  <h2><span class="sect">3</span>Chris's input</h2>
+  <h3>3.1 &nbsp;Invalidation policy (email, 14 July)</h3>
+  <p>
+    Pre-warmed caches with a <strong>TTL of 1 day</strong> — refresh every morning — plus a
+    function to invalidate the entire cache (<span class="mono">cache.clear()</span>).
+    Restatements are infrequent, so a same-day cache is fine in most cases; a use case that needs
+    fresher data <strong>bypasses</strong> the cache; a known restatement clears and re-warms.
+    <em>Status: all implemented — the TTL, the clear, the bypass (estimates), and the morning
+    warm job.</em>
+  </p>
+  <h3>3.2 &nbsp;Cache semantics</h3>
+  <ul>
+    <li><strong>Opt-in, caller-controlled</strong> — off by default; the caller owns the
+        speed-versus-freshness trade-off. <em>Implemented.</em></li>
+    <li><strong>Key includes model, variant, as_of, status</strong> — a point-in-time query never
+        gets a later restatement; T0 estimates are never served as official data.
+        <em>Partly implemented: estimates are excluded by bypass, and the persisted path carries
+        (as_of, model); as_of/status in the in-memory key is the open item from §1.</em></li>
+    <li><strong>Date-range requests fetch only the missing days and merge them in.</strong>
+        <em>Not implemented: today's coverage test is all-or-nothing — a request partly outside
+        coverage falls through in full. Fetch-and-merge is a natural extension of the coverage
+        model.</em></li>
+  </ul>
+  <h3>3.3 &nbsp;Reusable design</h3>
+  <p>
+    Chris's preferred shape is a <strong>reusable library</strong>: any data-access class becomes
+    cache-aware by accepting a <span class="mono">cache=</span> argument, defining
+    <span class="mono">__cache_identity__()</span>, and decorating methods with
+    <span class="mono">@cached_dataframe(date_range=True)</span>. The stated alternative — build
+    the cache directly into <span class="mono">ModelFacade</span> — is a smaller lift but not
+    reusable. The open question he posed: is there value in having it generically available?
+  </p>
+  <p>
+    One distinction worth keeping in view: the decorator and the working set
+    <strong>cache different things</strong>. The decorator memoizes query results; the working set
+    declares coverage — which is what makes the persisted morning warm and the offline cold start
+    possible. Current lean: make the opt-in <span class="mono">cache=</span> convention firm-wide
+    now, build the generic layer when a second data class needs it (a mechanical refactor).
+  </p>
+  <p>
+    Two practical considerations are worth weighing when the time comes.
+    <strong>Debuggability:</strong> a
+    per-query memo is only as correct as its key, and every decorated method is a fresh
+    opportunity for an identity bug — one argument missing from
+    <span class="mono">__cache_identity__</span> and the memo returns silently wrong data with
+    nothing visible at the call site. The working set fails safer: coverage is declarative and
+    inspectable (<span class="mono">stats</span>, the coverage dict,
+    <span class="mono">manifest.json</span> on disk), and a miss just runs the loader — the
+    failure mode is slowness, not wrongness. <strong>Lifetime:</strong> an in-memory memo dies
+    with the process, and making it persistent means rebuilding exactly the persistence
+    machinery the working set already has. <strong>Residual value:</strong> with a warm working
+    set, covered queries are already served in-memory sub-second — memoization's marginal win is
+    repeated <em>identical uncovered</em> queries and metadata pulls, and record &amp; playback
+    (§4) serves that case at the boundary anyway: on disk, across instances, auditable.
+  </p>
+
+  <h2><span class="sect">4</span>Proposal — record &amp; playback: caching and regression testing are one mechanism</h2>
+  <p>
+    There is an intersection between caching and regression testing that neither design above
+    exploits. The pattern, used successfully in past systems: enable a
+    <strong>record &amp; playback</strong> capability at the data-sourcing boundary. The record
+    <em>is</em> a cache — but it is a disk cache, in parquet, keyed by the request itself, and its
+    second life is as a <strong>regression fixture</strong>.
+  </p>
+  <h3>4.1 &nbsp;Mechanics</h3>
+  <ul>
+    <li>Every data-sourcing request is expressible as a <strong>canonical JSON document</strong> —
+        which implies (and enforces) a <strong>JSON schema for requests</strong>. This is a
+        feature, not overhead: it makes the request surface explicit and versionable.</li>
+    <li>The canonical JSON string is hashed with <strong>SHA-256</strong>; the digest is the key.</li>
+    <li>Two files per request: <span class="mono">&lt;key&gt;.request</span> (the JSON, kept
+        human-readable for audit and debugging) and <span class="mono">&lt;key&gt;.response</span>
+        (the result, parquet).</li>
+    <li>Three modes: <strong>record</strong> (create the cache on first pull),
+        <strong>force re-record</strong> (recreate when the upstream data or the schema changes),
+        and <strong>playback</strong> (subsequent reruns served entirely from disk).</li>
+    <li>The store is <strong>persistent across client instances</strong> when configured as such —
+        the same property the persisted working set already has, generalized to arbitrary
+        requests.</li>
+  </ul>
+  <pre># request → canonical JSON → SHA-256 → paired files
+{"fact": "factor_loading", "model_id": "AX_WW4_MH",
+ "start": "2026-01-01", "end": "2026-06-30",
+ "assets": [1017, 2044, ...], "version": 1, "as_of": "2026-06-30"}
+
+  ⇒ 9f2a…c41e.request   (the JSON above)
+  ⇒ 9f2a…c41e.response  (parquet)</pre>
+  <h3>4.2 &nbsp;The regression payoff</h3>
+  <p>
+    Once a session's pulls are recorded, the pairs are <strong>captured inputs for regression
+    tests</strong>. A model-based regression run replays from the recorded set and is therefore
+    <strong>dependent on no data infrastructure at all</strong> — no Snowflake, no S3, no query
+    engine, no network. That gives:
+  </p>
+  <ul>
+    <li>Deterministic, repeatable inputs — a regression failure is a code change, never a data
+        drift ambiguity.</li>
+    <li>CI that runs anywhere the parquet fixtures are, at local-disk speed (§2: sub-second vs
+        up to 159× slower remote).</li>
+    <li>Force re-record as the deliberate, auditable act of refreshing the baseline — the diff of
+        the <span class="mono">.request</span> files documents exactly what changed.</li>
+  </ul>
+  <h3>4.3 &nbsp;DataInterface — one choke point for all sourcing</h3>
+  <p>
+    To get this in <strong>one place across all data-sourcing calls</strong>, the record/playback
+    layer wraps a single <span class="mono">DataInterface</span> at the sourcing boundary. The
+    prototype is already shaped for this: the core-owned <span class="mono">DataSource</span>
+    protocol (§1.1) is exactly that choke point — semantic requests, no SQL, no layout. A
+    recording source is just a <span class="mono">DataSource</span> that wraps another
+    <span class="mono">DataSource</span>:
+  </p>
+  <pre>Model ── DataSource protocol ── RecordingSource(mode=record|playback|force)
+                                      └── Store (local | s3 → query engine)</pre>
+  <p>
+    Because requests are already serialized as canonical JSON, the same interface is
+    <strong>wire-ready</strong>: pointing sourcing at a server-side process later is a transport
+    change, not a redesign. The JSON request schema written for hashing is the API contract the
+    server would accept; the parquet response is the payload it would return. Record &amp; playback
+    today, client–server tomorrow, same seam.
+  </p>
+  <h3>4.4 &nbsp;Fixture housing — a separate repo, fixed dates only</h3>
+  <p>
+    Recorded fixtures live in <strong>their own git repository</strong>, holding only
+    <strong>fixed-date</strong> request/response pairs for regression testing. This carries one
+    canonicalization rule with it: recorded requests contain <strong>absolute dates only</strong> —
+    <span class="mono">'latest'</span> or any relative as-of resolves to concrete dates
+    <em>before</em> hashing, otherwise the same logical request hashes differently every day and
+    replay is not deterministic. The consequences fall out cleanly:
+  </p>
+  <ul>
+    <li>The main repo stays lean; fixtures change only on a deliberate re-record, a different
+        cadence from code.</li>
+    <li>A baseline refresh (force re-record) is a <strong>reviewable PR in the fixture
+        repo</strong> — the diff of the <span class="mono">.request</span> files documents
+        exactly what changed and why.</li>
+    <li>CI pins the fixture repo by commit, so a regression run is fully specified by
+        <strong>(code SHA, fixture SHA)</strong>.</li>
+    <li>Fixed-date slices are small — a regression suite's pulls, not the 680&nbsp;GB store —
+        so plain git suffices; no LFS needed initially.</li>
+    <li><strong>Data only.</strong> The fixture repo holds request/response pairs and nothing
+        else; the replay harness (the <span class="mono">RecordingSource</span> and the test
+        wiring that maps fixtures into playback mode) lives in the main repo beside
+        <span class="mono">datasource.py</span>. Fixtures stay a pure, tool-agnostic dataset;
+        harness changes version with the code they test.</li>
+  </ul>
+
+  <h2><span class="sect">5</span>Synthesis — three shapes, one seam, shared requirements</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>shape</th><th class="l">caches</th><th class="l">lives at</th><th class="l">unique payoff</th><th class="l">status</th></tr></thead>
+    <tbody>
+      <tr><td class="l">Working set</td><td class="l">declared coverage per dataset</td>
+          <td class="l">facade</td><td class="l">morning warm, offline cold start, covered-subset serving</td>
+          <td class="l">built</td></tr>
+      <tr><td class="l">Record &amp; playback</td><td class="l">exact request → response pairs</td>
+          <td class="l">DataSource boundary</td><td class="l">regression fixtures, infra-free reruns, server-ready contract</td>
+          <td class="l">proposed</td></tr>
+      <tr><td class="l">@cached_dataframe</td><td class="l">memoized query results</td>
+          <td class="l">any data class</td><td class="l">reuse beyond ModelFacade</td>
+          <td class="l">deferred until a second class needs it</td></tr>
+    </tbody>
+  </table></div>
+  <p>
+    These are complementary, not competing. The working set serves the interactive session; record
+    &amp; playback serves determinism and testing at the boundary below it; the decorator is the
+    generalization to adopt when a second data class asks for caching. Notably, record &amp;
+    playback <em>is</em> request-keyed memoization — Chris's decorator semantics — placed at the
+    sourcing seam, where it additionally buys the regression capability and the future server
+    path.
+  </p>
+  <div class="callout">
+    <p><span class="h">Shared requirements, whichever shapes ship.</span></p>
+    <p>· Opt-in, off by default — settled, keep it.</p>
+    <p>· A canonical, versioned JSON request schema — required for the SHA-256 key, and the
+       future service contract for free.</p>
+    <p>· <span class="mono">as_of</span>/status in the cache identity everywhere — the working-set
+       key gap (§1) and the request hash both need it; PIT answers must never see a later
+       republication, and T0 estimates must never replay as official.</p>
+    <p>· Explicit invalidation as a deliberate act — <span class="mono">clear()</span> +
+       re-warm for the working set, force re-record for the fixture store; both auditable.</p>
+  </div>
+
+  <h2><span class="sect">6</span>Recommendation</h2>
+  <p>
+    Record &amp; playback is the strongest addition on the table — but its value is as a
+    <strong>determinism and testing mechanism</strong>, not as a rival cache. Exact-match
+    request hashing is the wrong shape for an interactive cache (reorder the asset list or
+    extend the range by a day and you miss — precisely the case the working set's coverage
+    model handles), and exactly the right shape for a regression contract, where byte-identity
+    is the feature. Keep both layers, each doing the one thing it is good at; resist unifying
+    them.
+  </p>
+  <h3>6.1 &nbsp;Build next</h3>
+  <ul>
+    <li><strong><span class="mono">RecordingSource</span></strong> wrapping any
+        <span class="mono">DataSource</span>, with the three modes — and <strong>strict
+        playback</strong>: in playback mode a miss raises, it never falls through to the store.
+        A silent fall-through quietly reintroduces the infrastructure dependency the mode exists
+        to remove; a hard failure says honestly that the code's data demands changed and the
+        baseline needs a deliberate re-record.</li>
+    <li><strong>One model regression wired to fixtures end-to-end</strong> as the proof — record
+        a session, replay it in CI with no store, no engine, no network.</li>
+    <li><strong><span class="mono">as_of</span>/status into both identities while there.</strong>
+        A request is not replayable unless its identity is complete, so record &amp; playback is
+        a natural forcing function for the PIT-correctness requirement in §1 — close the
+        working-set key gap in the same change.</li>
+  </ul>
+  <h3>6.2 &nbsp;Where the real work is: canonicalization</h3>
+  <p>
+    The hash is trivial; the canonical form is not. Sorted keys, sorted asset lists, one date
+    format, and — the subtle one — <strong>defaults materialized rather than omitted</strong>,
+    or <span class="mono">{"version": 1}</span> and <span class="mono">{}</span> become two
+    different fixtures for the same pull. Absolute dates only in recorded requests —
+    <span class="mono">'latest'</span> resolves before hashing (§4.4). Define the request as a
+    typed model that normalizes before serializing, and put a <strong>schema version inside the
+    hashed payload</strong> so a schema change deliberately invalidates the fixture set instead
+    of silently colliding with it.
+  </p>
+  <h3>6.3 &nbsp;Cautions</h3>
+  <ul>
+    <li><strong>Fixture sprawl — addressed by §4.4.</strong> The separate fixed-date fixture
+        repo bounds growth: fixtures are a regression suite's slices, not accumulated session
+        traffic, and grow only on deliberate re-record. Against real vendor data at SFM,
+        recorded fixtures still carry licensing weight — worth a sentence in any proposal.</li>
+    <li><strong>Don't headline the server path.</strong> The JSON request schema being
+        wire-ready is real, but an actual service brings auth and versioning decisions not worth
+        defending yet. Keep it as the footnote it is in §4.3.</li>
+  </ul>
+  <h3>6.4 &nbsp;Defer</h3>
+  <p>
+    The missing-days fetch-and-merge (§3.2) and the generic
+    <span class="mono">@cached_dataframe</span> layer (§3.3) both wait until something concrete
+    demands them — the merge until partial-coverage misses show up in practice (and not before
+    the restatement story is solid — see the append-only trap in §1.4), the decorator
+    until a second data class asks for caching. Both are mechanical extensions of seams that
+    already exist; neither blocks anything above.
+  </p>
+  <div class="callout">
+    <p><span class="h">Positioning note.</span> Record &amp; playback sidesteps the
+    decorator-versus-facade ownership debate entirely — it is neither, it sits at the
+    core-owned boundary — and it gives QDS a deterministic test harness for FMA's own
+    regression, which strengthens the proposal whoever ends up owning
+    <span class="mono">ModelFacade</span>.</p>
+  </div>
+
+  <footer>
+    Sources: <span class="mono">python_src/modelfacade/cache.py</span>,
+    <span class="mono">datasource.py</span>, <span class="mono">facade.py</span>,
+    <span class="mono">warm_cache.py</span>; benchmark suites
+    <span class="mono">tmp/benchmark-results-v2.md</span> and
+    <span class="mono">tmp/benchmark-comparison-stage4.md</span>; Chris Haltiner email
+    2026-07-14 and subsequent discussion.
+  </footer>
+</main>
+</body>
+</html>
