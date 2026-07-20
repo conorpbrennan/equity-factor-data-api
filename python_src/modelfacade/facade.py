@@ -166,13 +166,14 @@ class ModelFacade:
 
     def _loadings_long(self, lo: date, hi: date, ids, factors) -> pl.DataFrame:
         """Sparse long-form loadings over [lo, hi], via the cache."""
-        if lo == hi:
-            loader = lambda: self._model.factor_loadings(
-                lo, assets=ids, factors=factors)
-        else:
-            loader = lambda: self._model.loading_history(
-                lo, hi, assets=ids, factors=factors)
-        long = self.cache.get("factor_loading", lo, hi, ids, loader)
+        loader = lambda s, e, a: (
+            self._model.factor_loadings(s, assets=a, factors=factors)
+            if s == e else
+            self._model.loading_history(s, e, assets=a, factors=factors))
+        # a factor-filtered load is not cache-shaped (cache holds all
+        # factors) — serve it from coverage when possible, never merge it
+        long = self.cache.get("factor_loading", lo, hi, ids, loader,
+                              extendable=factors is None)
         if factors is not None:                       # cache holds all factors
             long = long.filter(pl.col(FACTOR_ID).is_in(list(factors)))
         return long
@@ -269,7 +270,8 @@ class ModelFacade:
         if "specific_risk" in fields:
             srisk = self.cache.get(
                 "specific_risk", lo, hi, ids,
-                lambda: self._model.specific_risk_history(lo, hi, assets=ids))
+                lambda s, e, a: self._model.specific_risk_history(s, e,
+                                                                  assets=a))
             legs.append(self._scale(srisk, "specific_risk",
                                     self._model.conventions
                                     ["specific_risk_convention"])
@@ -278,7 +280,7 @@ class ModelFacade:
         if "returns" in fields:
             rets = self.cache.get(
                 "asset_return", lo, hi, ids,
-                lambda: self._model.asset_returns(lo, hi, assets=ids))
+                lambda s, e, a: self._model.asset_returns(s, e, assets=a))
             legs.append(self._scale(rets, "return",
                                     self._model.conventions
                                     ["return_convention"])
@@ -311,7 +313,7 @@ class ModelFacade:
         ids = self._resolve_assets(assets, sec_id_type)
         raw = self.cache.get(
             "specific_risk", cob, cob, ids,
-            lambda: self._model.specific_risk(cob, assets=ids))
+            lambda s, e, a: self._model.specific_risk(s, assets=a))
         return self._out(self._scale(
             raw, "specific_risk",
             self._model.conventions["specific_risk_convention"]))
@@ -345,7 +347,9 @@ class ModelFacade:
         else:
             raw = self.cache.get(
                 "factor_return", lo, hi, None,
-                lambda: self._model.factor_returns(lo, hi, factors=factors))
+                lambda s, e, a: self._model.factor_returns(s, e,
+                                                           factors=factors),
+                extendable=factors is None)
         if factors is not None:
             raw = raw.filter(pl.col(FACTOR_ID).is_in(list(factors)))
         return self._out(self._scale(
@@ -421,7 +425,7 @@ class ModelFacade:
         return Path(base).expanduser() / "usercache"
 
     def _coverage_end(self) -> date:
-        ends = [c.end for c in self.cache.coverage.values()]
+        ends = [c.end for segs in self.cache.coverage.values() for c in segs]
         if not ends:
             raise ValueError("nothing warmed — call warm() before save_cache()")
         return max(ends)
@@ -586,5 +590,6 @@ class ModelFacade:
         fac = cls(Model(store, model_id), cache=cache, output=output)
         fac._frozen_latest = (date.fromisoformat(meta["as_of"])
                               if meta.get("as_of")
-                              else max(c.end for c in cache.coverage.values()))
+                              else max(c.end for segs in cache.coverage.values()
+                                       for c in segs))
         return fac

@@ -34,7 +34,7 @@ import pyarrow.parquet as pq
 from conventions import SecurityIDType, scale_to_canonical, snake_case
 from conventions.signatures import DISCOURAGED
 
-from .cache import UserCache
+from .cache import CacheBehaviour, Coverage, UserCache
 from .core import Model
 from .facade import ModelFacade
 from .store import Store, list_models
@@ -595,6 +595,165 @@ def check_cache_prewarm(root):
     assert sorted(again["asset_id"]) == [1, 2]
 
 
+def check_cache_extend(root):
+    """Extend-on-demand (Chris, 2026-07-20): warm a core that covers most
+    queries; anything outside is queried once, merged into the working set,
+    and covered thereafter — coverage grows to match actual usage instead of
+    asking users to predict it. EXTEND is the default; STRICT preserves
+    serve-only-declared-coverage (a miss never mutates the set).
+
+    Loaders are gap-aware — loader(s, e, assets) — so a partly covered
+    request fetches only the missing cells. Three extension cases, all
+    resolved by one rule (group missing assets by their per-asset date
+    gaps; one fetch per gap when every missing asset shares the same gaps,
+    one full-request load otherwise):
+
+      1. new dates, warmed assets    → fetch only the missing days
+      2. new assets, covered dates   → fetch only the new assets
+         (the canonical morning shape: warm ran on last night's
+         positions, today's book gained names)
+      3. new dates AND new assets
+         3a. every missing asset misses the same ranges → one gap fetch
+         3b. missing assets miss different ranges → one fetch per
+             gap-signature group (only missing cells travel), degrading
+             to one full-request load beyond MAX_FETCH_GROUPS groups
+
+    Demonstrated at two levels: UserCache directly with a stub loader that
+    records exactly which (dates × assets) hit the 'store', then through
+    the facade (an unwarmed asset is fetched from the store once and served
+    from cache on the repeat request)."""
+    from conventions import ASSET_ID, COB_DATE
+
+    days = [date(2025, 2, 1) + timedelta(days=i) for i in range(12)]
+
+    def frame(ds, assets_):
+        return pl.DataFrame(
+            [{COB_DATE: dy, ASSET_ID: a, "v": float(a)} for dy in ds
+             for a in assets_])
+
+    calls: list = []
+
+    def load(s, e, a):
+        calls.append((s, e, None if a is None else tuple(sorted(a))))
+        return frame([dy for dy in days if s <= dy <= e], sorted(a))
+
+    cache = UserCache()
+    assert cache.behaviour is CacheBehaviour.EXTEND        # the default
+    cache.put("ds", frame(days[:4], [1, 2]),
+              Coverage(days[0], days[3], frozenset({1, 2})))
+
+    # covered → hit, loader untouched
+    cache.get("ds", days[1], days[2], [1], load)
+    assert calls == [] and cache.hits == 1
+
+    # CASE 1 — new dates, warmed assets: only the uncovered days[4..6] hit
+    # the store; the served answer spans the full request; the new segment
+    # coalesces (adjacent, same scope) into one; the repeat is a hit
+    out = cache.get("ds", days[2], days[6], [1, 2], load)
+    assert calls == [(days[4], days[6], (1, 2))]           # the gap, only
+    assert out.height == 5 * 2                             # full answer
+    assert len(cache.coverage["ds"]) == 1                  # coalesced 0..6
+    cache.get("ds", days[2], days[6], [1, 2], load)
+    assert len(calls) == 1 and cache.hits == 2             # no second load
+
+    # CASE 1, disjoint variant: a detached range becomes its own segment; a
+    # spanning request then fetches ONLY the inner gap (day 7) and heals
+    # coverage to a single segment, with rows exactly deduplicated
+    cache.get("ds", days[8], days[9], [1, 2], load)
+    assert calls[-1] == (days[8], days[9], (1, 2))
+    assert len(cache.coverage["ds"]) == 2                  # gap at days[7]
+    span = cache.get("ds", days[0], days[9], [1, 2], load)
+    assert calls[-1] == (days[7], days[7], (1, 2))         # gap-only fetch
+    assert len(cache.coverage["ds"]) == 1                  # healed
+    assert span.height == 20 and cache.frames["ds"].height == 20
+
+    # CASE 2 — new assets, covered dates (book-plus-adds): assets 1,2 are
+    # covered, asset 7 is not; only asset 7 hits the store, over the
+    # requested range only
+    mixed = cache.get("ds", days[0], days[3], [1, 2, 7], load)
+    assert calls[-1] == (days[0], days[3], (7,))           # the adds, only
+    assert mixed.height == 4 * 3                           # full answer
+    n = len(calls)
+    cache.get("ds", days[0], days[3], [1, 2, 7], load)     # repeat → hit
+    assert len(calls) == n
+    got = cache.get("ds", days[0], days[3], [7], load)     # add alone → hit
+    assert len(calls) == n and got[ASSET_ID].unique().to_list() == [7]
+
+    # extendable=False: served from coverage when possible, and a miss is
+    # never merged into the set
+    segs = len(cache.coverage["ds"])
+    cache.get("ds", days[0], days[9], [1], load, extendable=False)
+    assert len(calls) == n                                 # union-served
+    cache.get("ds", days[10], days[11], [1, 2], load, extendable=False)
+    assert calls[-1] == (days[10], days[11], (1, 2))       # full load...
+    assert len(cache.coverage["ds"]) == segs               # ...not merged
+    n = len(calls)
+
+    # CASE 3a — new dates AND new assets, same gaps: days[10..11] are
+    # uncovered for everyone (1, 2 warmed to day 9; 9 never seen), so all
+    # three miss the same ranges → ONE fetch of exactly those cells
+    both = cache.get("ds", days[10], days[11], [1, 2, 9], load)
+    assert calls[-1] == (days[10], days[11], (1, 2, 9))
+    assert both.height == 2 * 3
+    n = len(calls)
+    cache.get("ds", days[10], days[11], [1, 2, 9], load)   # repeat → hit
+    assert len(calls) == n
+
+    # CASE 3b — new dates AND new assets, different gaps: asset 7 (covered
+    # to day 3) misses days[6..11]; asset 9 (covered days[10..11] by 3a)
+    # misses days[6..9] — two gap-signature groups, so exactly two fetches,
+    # each carrying only that group's missing cells; the repeat is a hit
+    fell = cache.get("ds", days[6], days[11], [7, 9], load)
+    assert calls[-2:] == [(days[6], days[11], (7,)),
+                          (days[6], days[9], (9,))]        # per-group gaps
+    assert fell.height == 6 * 2
+    n = len(calls)
+    cache.get("ds", days[6], days[11], [7, 9], load)       # repeat → hit
+    assert len(calls) == n
+
+    # beyond MAX_FETCH_GROUPS distinct signatures → one full-request load
+    # (round trips have fixed latency; N tiny queries would cost more)
+    wild = UserCache()
+    wild.get("ds", days[0], days[0], [1], load)            # three assets
+    wild.get("ds", days[1], days[1], [2], load)            # with three
+    wild.get("ds", days[2], days[2], [3], load)            # histories
+    calls.clear()
+    wild.get("ds", days[0], days[3], [1, 2, 3, 4], load)   # 4 signatures
+    assert calls == [(days[0], days[3], (1, 2, 3, 4))]     # one full load
+    n0 = len(calls)
+    wild.get("ds", days[0], days[3], [1, 2, 3, 4], load)   # repeat → hit
+    assert len(calls) == n0
+
+    # clear() drops extensions along with the warm
+    cache.clear()
+    assert cache.coverage == {} and cache.frames == {}
+
+    # STRICT: a miss loads the full request and never mutates the set —
+    # no gap-fetching, because gap-fetching implies merging
+    strict = UserCache(behaviour=CacheBehaviour.STRICT)
+    strict.put("ds", frame(days[:4], [1, 2]),
+               Coverage(days[0], days[3], frozenset({1, 2})))
+    calls.clear()
+    strict.get("ds", days[2], days[6], [1, 2], load)
+    strict.get("ds", days[2], days[6], [1, 2], load)
+    assert calls == [(days[2], days[6], (1, 2))] * 2       # full, both times
+    assert len(strict.coverage["ds"]) == 1                 # set unchanged
+    assert strict.frames["ds"].height == 4 * 2
+
+    # through the facade: warm [1,2,3], then ask for asset 6 — fetched from
+    # the store once, extended, served from cache on the repeat
+    fac = ModelFacade.load(MID, str(root), output="polars",
+                           cache=UserCache())
+    fac.warm([1, 2, 3])
+    m0, h0 = fac.cache.stats["misses"], fac.cache.stats["hits"]
+    first = fac.get_factor_loadings("latest", assets=[6])
+    assert fac.cache.stats["misses"] == m0 + 1
+    again = fac.get_factor_loadings("latest", assets=[6])
+    assert fac.cache.stats["misses"] == m0 + 1             # no second store hit
+    assert fac.cache.stats["hits"] == h0 + 1
+    assert again.equals(first)                             # same answer either way
+
+
 def check_cache_persistence(root):
     """Cross-session reuse with the keyed layout: the cache key is
     (as-of COB date, model_id) -> <base>/usercache/<as_of>/<model_id>/.
@@ -775,6 +934,7 @@ CHECKS = [
     ("facade: T0 estimate stream via the type column", check_t0_estimates),
     ("facade: security panel + date-range loadings", check_panel_and_history),
     ("facade: cache off by default; opt-in pre-warm serves covered subsets", check_cache_prewarm),
+    ("facade: cache extend-on-demand merges misses into the working set", check_cache_extend),
     ("facade: cache persists to parquet, reloads across sessions", check_cache_persistence),
     ("facade: from_cache cold-starts offline, zero store contact", check_from_cache_offline),
     ("inventory: static model inventory matches ids and store schema", check_inventory),

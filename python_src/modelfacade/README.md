@@ -40,6 +40,17 @@ explicit conversion between them.
   **pre-warming an expected working set** (`warm(assets)` = YTD loadings +
   specific risk for a position list, plus all factor returns), serving
   subset requests from it — not query-result caching
+- **extend-on-demand**: under `CacheBehaviour.EXTEND` (the default) a miss
+  is queried once, merged into the working set, and covered thereafter —
+  warm a core that answers most questions and let coverage grow with
+  actual usage; loaders are gap-aware, so a partly covered request fetches
+  **only the missing cells** on both axes (fetch-the-gap): extending a
+  warmed range by a week loads a week, and asking about the warmed book
+  plus two new names loads the two names; missing assets are grouped by
+  their gap ranges — one fetch per group — degrading to one full-request
+  load beyond `MAX_FETCH_GROUPS` distinct groups (round trips have fixed
+  latency); `UserCache(behaviour=CacheBehaviour.STRICT)` serves only
+  declared coverage and never mutates the set on a miss
 - working-set **persistence**: `save_cache()` / `load_cache()` write the
   warmed frames as parquet + a coverage manifest, keyed by
   (as-of date, model_id) under `<temp>/usercache/<as_of>/<model_id>/`
