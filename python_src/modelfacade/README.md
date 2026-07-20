@@ -40,6 +40,24 @@ explicit conversion between them.
   **pre-warming an expected working set** (`warm(assets)` = YTD loadings +
   specific risk for a position list, plus all factor returns), serving
   subset requests from it — not query-result caching
+- **extend-on-demand**: under `CacheBehaviour.EXTEND` (the default) a miss
+  is queried once, merged into the working set, and covered thereafter —
+  warm a core that answers most questions and let coverage grow with
+  actual usage; loaders are gap-aware, so a partly covered request fetches
+  **only the missing cells** on both axes (fetch-the-gap): extending a
+  warmed range by a week loads a week, and asking about the warmed book
+  plus two new names loads the two names; missing assets are grouped by
+  their gap ranges — one fetch per group — degrading to one full-request
+  load beyond `MAX_FETCH_GROUPS` distinct groups (round trips have fixed
+  latency); `UserCache(behaviour=CacheBehaviour.STRICT)` serves only
+  declared coverage and never mutates the set on a miss
+- **view identity**: the cache key includes the publication view
+  (`view="official"` by default; an estimate or PIT view keys its own
+  frames as `dataset@view`), so a PIT answer can never be served a later
+  republication and estimates can never be served as official — the
+  identity requirement from the caching design doc, structural rather
+  than by convention. Merges dedupe per cell with freshly loaded rows
+  winning
 - working-set **persistence**: `save_cache()` / `load_cache()` write the
   warmed frames as parquet + a coverage manifest, keyed by
   (as-of date, model_id) under `<temp>/usercache/<as_of>/<model_id>/`
@@ -47,9 +65,14 @@ explicit conversion between them.
   later sessions; `load_cache()` defaults to the newest date for its model
   and refuses a set saved for a different model
 - **invalidation**: saved sets carry a 1-day TTL (the pattern is a morning
-  re-warm; pass `max_age_days=None` to knowingly accept an older set), and
-  `cache.clear()` drops the whole working set on a known restatement —
-  every request then falls through to the store until the next `warm()`
+  re-warm; pass `max_age_days=None` to knowingly accept an older set). A
+  stale or missing set is **dismissed, not raised**: `load_cache()` warns,
+  starts with an empty cache, and re-queries the store as requests arrive
+  (extend-on-demand rebuilds the set); `from_cache()` does the same when a
+  store is reachable, and raises only genuinely offline, where there is
+  nothing to re-query. `cache.clear()` drops the whole working set on a
+  known restatement — every request then falls through to the store until
+  the next `warm()`
 - **offline cold start**: `from_cache(model_id, root)` rebuilds a session
   from a saved set (dims included) with zero store contact; `'latest'`
   freezes at the set's as-of date

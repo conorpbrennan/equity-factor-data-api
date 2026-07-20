@@ -34,7 +34,7 @@ import pyarrow.parquet as pq
 from conventions import SecurityIDType, scale_to_canonical, snake_case
 from conventions.signatures import DISCOURAGED
 
-from .cache import UserCache
+from .cache import CacheBehaviour, Coverage, UserCache
 from .core import Model
 from .facade import ModelFacade
 from .store import Store, list_models
@@ -595,6 +595,233 @@ def check_cache_prewarm(root):
     assert sorted(again["asset_id"]) == [1, 2]
 
 
+def check_cache_extend(root):
+    """Extend-on-demand (Chris, 2026-07-20): warm a core that covers most
+    queries; anything outside is queried once, merged into the working set,
+    and covered thereafter — coverage grows to match actual usage instead of
+    asking users to predict it. EXTEND is the default; STRICT preserves
+    serve-only-declared-coverage (a miss never mutates the set).
+
+    Loaders are gap-aware — loader(s, e, assets) — so a partly covered
+    request fetches only the missing cells. Three extension cases, all
+    resolved by one rule (group missing assets by their per-asset date
+    gaps; one fetch per gap when every missing asset shares the same gaps,
+    one full-request load otherwise):
+
+      1. new dates, warmed assets    → fetch only the missing days
+      2. new assets, covered dates   → fetch only the new assets
+         (the canonical morning shape: warm ran on last night's
+         positions, today's book gained names)
+      3. new dates AND new assets
+         3a. every missing asset misses the same ranges → one gap fetch
+         3b. missing assets miss different ranges → one fetch per
+             gap-signature group (only missing cells travel), degrading
+             to one full-request load beyond MAX_FETCH_GROUPS groups
+
+    Demonstrated at two levels: UserCache directly with a stub loader that
+    records exactly which (dates × assets) hit the 'store', then through
+    the facade (an unwarmed asset is fetched from the store once and served
+    from cache on the repeat request)."""
+    from conventions import ASSET_ID, COB_DATE
+
+    days = [date(2025, 2, 1) + timedelta(days=i) for i in range(12)]
+
+    def frame(ds, assets_):
+        return pl.DataFrame(
+            [{COB_DATE: dy, ASSET_ID: a, "v": float(a)} for dy in ds
+             for a in assets_])
+
+    calls: list = []
+
+    def load(s, e, a):
+        calls.append((s, e, None if a is None else tuple(sorted(a))))
+        return frame([dy for dy in days if s <= dy <= e], sorted(a))
+
+    cache = UserCache()
+    assert cache.behaviour is CacheBehaviour.EXTEND        # the default
+    cache.put("ds", frame(days[:4], [1, 2]),
+              Coverage(days[0], days[3], frozenset({1, 2})))
+
+    # covered → hit, loader untouched
+    cache.get("ds", days[1], days[2], [1], load)
+    assert calls == [] and cache.hits == 1
+
+    # CASE 1 — new dates, warmed assets: only the uncovered days[4..6] hit
+    # the store; the served answer spans the full request; the new segment
+    # coalesces (adjacent, same scope) into one; the repeat is a hit
+    out = cache.get("ds", days[2], days[6], [1, 2], load)
+    assert calls == [(days[4], days[6], (1, 2))]           # the gap, only
+    assert out.height == 5 * 2                             # full answer
+    assert len(cache.coverage["ds"]) == 1                  # coalesced 0..6
+    cache.get("ds", days[2], days[6], [1, 2], load)
+    assert len(calls) == 1 and cache.hits == 2             # no second load
+
+    # CASE 1, disjoint variant: a detached range becomes its own segment; a
+    # spanning request then fetches ONLY the inner gap (day 7) and heals
+    # coverage to a single segment, with rows exactly deduplicated
+    cache.get("ds", days[8], days[9], [1, 2], load)
+    assert calls[-1] == (days[8], days[9], (1, 2))
+    assert len(cache.coverage["ds"]) == 2                  # gap at days[7]
+    span = cache.get("ds", days[0], days[9], [1, 2], load)
+    assert calls[-1] == (days[7], days[7], (1, 2))         # gap-only fetch
+    assert len(cache.coverage["ds"]) == 1                  # healed
+    assert span.height == 20 and cache.frames["ds"].height == 20
+
+    # CASE 2 — new assets, covered dates (book-plus-adds): assets 1,2 are
+    # covered, asset 7 is not; only asset 7 hits the store, over the
+    # requested range only
+    mixed = cache.get("ds", days[0], days[3], [1, 2, 7], load)
+    assert calls[-1] == (days[0], days[3], (7,))           # the adds, only
+    assert mixed.height == 4 * 3                           # full answer
+    n = len(calls)
+    cache.get("ds", days[0], days[3], [1, 2, 7], load)     # repeat → hit
+    assert len(calls) == n
+    got = cache.get("ds", days[0], days[3], [7], load)     # add alone → hit
+    assert len(calls) == n and got[ASSET_ID].unique().to_list() == [7]
+
+    # extendable=False: served from coverage when possible, and a miss is
+    # never merged into the set
+    segs = len(cache.coverage["ds"])
+    cache.get("ds", days[0], days[9], [1], load, extendable=False)
+    assert len(calls) == n                                 # union-served
+    cache.get("ds", days[10], days[11], [1, 2], load, extendable=False)
+    assert calls[-1] == (days[10], days[11], (1, 2))       # full load...
+    assert len(cache.coverage["ds"]) == segs               # ...not merged
+    n = len(calls)
+
+    # CASE 3a — new dates AND new assets, same gaps: days[10..11] are
+    # uncovered for everyone (1, 2 warmed to day 9; 9 never seen), so all
+    # three miss the same ranges → ONE fetch of exactly those cells
+    both = cache.get("ds", days[10], days[11], [1, 2, 9], load)
+    assert calls[-1] == (days[10], days[11], (1, 2, 9))
+    assert both.height == 2 * 3
+    n = len(calls)
+    cache.get("ds", days[10], days[11], [1, 2, 9], load)   # repeat → hit
+    assert len(calls) == n
+
+    # CASE 3b — new dates AND new assets, different gaps: asset 7 (covered
+    # to day 3) misses days[6..11]; asset 9 (covered days[10..11] by 3a)
+    # misses days[6..9] — two gap-signature groups, so exactly two fetches,
+    # each carrying only that group's missing cells; the repeat is a hit
+    fell = cache.get("ds", days[6], days[11], [7, 9], load)
+    assert calls[-2:] == [(days[6], days[11], (7,)),
+                          (days[6], days[9], (9,))]        # per-group gaps
+    assert fell.height == 6 * 2
+    n = len(calls)
+    cache.get("ds", days[6], days[11], [7, 9], load)       # repeat → hit
+    assert len(calls) == n
+
+    # beyond MAX_FETCH_GROUPS distinct signatures → one full-request load
+    # (round trips have fixed latency; N tiny queries would cost more)
+    wild = UserCache()
+    wild.get("ds", days[0], days[0], [1], load)            # three assets
+    wild.get("ds", days[1], days[1], [2], load)            # with three
+    wild.get("ds", days[2], days[2], [3], load)            # histories
+    calls.clear()
+    wild.get("ds", days[0], days[3], [1, 2, 3, 4], load)   # 4 signatures
+    assert calls == [(days[0], days[3], (1, 2, 3, 4))]     # one full load
+    n0 = len(calls)
+    wild.get("ds", days[0], days[3], [1, 2, 3, 4], load)   # repeat → hit
+    assert len(calls) == n0
+
+    # clear() drops extensions along with the warm
+    cache.clear()
+    assert cache.coverage == {} and cache.frames == {}
+
+    # STRICT: a miss loads the full request and never mutates the set —
+    # no gap-fetching, because gap-fetching implies merging
+    strict = UserCache(behaviour=CacheBehaviour.STRICT)
+    strict.put("ds", frame(days[:4], [1, 2]),
+               Coverage(days[0], days[3], frozenset({1, 2})))
+    calls.clear()
+    strict.get("ds", days[2], days[6], [1, 2], load)
+    strict.get("ds", days[2], days[6], [1, 2], load)
+    assert calls == [(days[2], days[6], (1, 2))] * 2       # full, both times
+    assert len(strict.coverage["ds"]) == 1                 # set unchanged
+    assert strict.frames["ds"].height == 4 * 2
+
+    # through the facade: warm [1,2,3], then ask for asset 6 — fetched from
+    # the store once, extended, served from cache on the repeat
+    fac = ModelFacade.load(MID, str(root), output="polars",
+                           cache=UserCache())
+    fac.warm([1, 2, 3])
+    m0, h0 = fac.cache.stats["misses"], fac.cache.stats["hits"]
+    first = fac.get_factor_loadings("latest", assets=[6])
+    assert fac.cache.stats["misses"] == m0 + 1
+    again = fac.get_factor_loadings("latest", assets=[6])
+    assert fac.cache.stats["misses"] == m0 + 1             # no second store hit
+    assert fac.cache.stats["hits"] == h0 + 1
+    assert again.equals(first)                             # same answer either way
+
+
+def check_cache_view_identity(root):
+    """The cache identity includes the VIEW rows were loaded under —
+    official vs a T0-estimate or PIT stream — closing the caching-design
+    gap structurally: each view keys its own frames and coverage
+    (dataset@view), so a point-in-time answer can never be served a later
+    republication and estimates can never be served as official, no matter
+    what a caller forgets. Also: merges dedupe per cell
+    (cob_date/asset_id/factor_id) with freshly loaded rows winning, so a
+    republication re-fetched by a full-load path replaces the stale row
+    instead of sitting beside it."""
+    from conventions import ASSET_ID, COB_DATE
+
+    days = [date(2025, 3, 1) + timedelta(days=i) for i in range(4)]
+    calls: list = []
+
+    def load(s, e, a):
+        calls.append((s, e, tuple(sorted(a))))
+        v = float(len(calls))                # each load returns new values
+        return pl.DataFrame(
+            [{COB_DATE: dy, ASSET_ID: x, "v": v}
+             for dy in days if s <= dy <= e for x in sorted(a)])
+
+    cache = UserCache()
+    cache.put("ds",
+              pl.DataFrame([{COB_DATE: dy, ASSET_ID: 1, "v": 0.0}
+                            for dy in days]),
+              Coverage(days[0], days[-1], frozenset({1})))
+
+    # same dates, same assets, different view → structurally a miss: the
+    # official frame is never served for an estimate request, and the
+    # estimate rows key separately
+    est = cache.get("ds", days[0], days[-1], [1], load, view="t0_estimate")
+    assert len(calls) == 1 and est["v"].to_list() == [1.0] * 4
+    assert set(cache.stats["rows"]) == {"ds", "ds@t0_estimate"}
+
+    # each view serves its own frames — both are hits now, values distinct
+    off = cache.get("ds", days[0], days[-1], [1], load)
+    assert len(calls) == 1 and off["v"].to_list() == [0.0] * 4
+    est2 = cache.get("ds", days[0], days[-1], [1], load, view="t0_estimate")
+    assert len(calls) == 1 and est2["v"].to_list() == [1.0] * 4
+
+    # persistence round-trips both views
+    with tempfile.TemporaryDirectory() as td:
+        cache.to_disk(td)
+        back, _ = UserCache.from_disk(td)
+    assert set(back.frames) == {"ds", "ds@t0_estimate"}
+    assert back.get("ds", days[0], days[0], [1], load)["v"].to_list() == [0.0]
+
+    # per-cell dedupe, fresh-wins: three assets with three histories plus a
+    # fourth force the beyond-cap full load, which overlaps the seeded
+    # cells with NEW values — the fresh rows replace the stale ones
+    w = UserCache()
+    w.get("ds", days[0], days[0], [1], load)
+    w.get("ds", days[1], days[1], [2], load)
+    w.get("ds", days[2], days[2], [3], load)
+    full = w.get("ds", days[0], days[3], [1, 2, 3, 4], load)
+    vfull = float(len(calls))
+    assert full.height == 4 * 4                        # one row per cell
+    assert w.frames["ds"].height == 16                 # no stale leftovers
+    # the STORED copy of a previously-seeded cell is the fresh one: re-get
+    # a now-covered cell (a hit, served from the frame — no load) and its
+    # value is the full-load's, not the seed's
+    n = len(calls)
+    again = w.get("ds", days[0], days[0], [1], load)
+    assert len(calls) == n                             # served from cache
+    assert again["v"].to_list() == [vfull]             # fresh copy won
+
+
 def check_cache_persistence(root):
     """Cross-session reuse with the keyed layout: the cache key is
     (as-of COB date, model_id) -> <base>/usercache/<as_of>/<model_id>/.
@@ -629,23 +856,40 @@ def check_cache_persistence(root):
             a.cache.frames["factor_loading"])           # lossless round trip
         b.load_cache(as_of=DATES[-1])                   # pinned date works too
 
-        # TTL: a set saved >1 day ago refuses by default, loads on opt-out
+        # TTL: a stale set is DISMISSED, not raised (Chris, 2026-07-20 —
+        # "the cache should just be dismissed and the data re-queried"):
+        # the facade warns, starts with an empty cache, and the next
+        # request falls through to the store; opt-out adopts it knowingly
         import json as _json
+        import warnings as _warnings
         mpath = saved_to / "manifest.json"
         m = _json.loads(mpath.read_text())
         m["meta"]["saved_at"] = "2020-01-01T00:00:00+00:00"
         mpath.write_text(_json.dumps(m))
-        try:
-            b.load_cache()
-            raise AssertionError("stale working set accepted")
-        except ValueError as e:
-            assert "TTL" in str(e)
-        b.load_cache(max_age_days=None)                 # explicit opt-out
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            res = b.load_cache()
+        assert res["adopted"] is False and "old" in res["dismissed"]
+        assert any("dismissed" in str(w.message) for w in caught)
+        assert isinstance(b.cache, UserCache) and b.cache.frames == {}
+        requeried = b.get_factor_loadings("2025-01-10", assets=[1, 2])
+        assert requeried.height == 2                    # re-queried, correct
+        assert b.cache.stats["misses"] == 1             # ...from the store
+        res = b.load_cache(max_age_days=None)           # explicit opt-out
+        assert res["adopted"] is True
 
+        # a model with no saved set: also dismissed, not an error — but an
+        # EXPLICIT path (caller error) and a set saved for a different
+        # model still raise
         other = ModelFacade.load("BARRA_TEST1_L", str(root), output="polars")
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            res = other.load_cache()                    # no set: starts empty
+        assert res["adopted"] is False and res["dismissed"] == "missing"
+        assert isinstance(other.cache, UserCache)
         try:
-            other.load_cache()                          # no set for its model
-            raise AssertionError("found a set for a model never saved")
+            other.load_cache(path=Path(root) / "nowhere")
+            raise AssertionError("explicit missing path accepted")
         except FileNotFoundError:
             pass
         try:
@@ -662,7 +906,12 @@ def check_from_cache_offline(root):
     dimension tables next to the facts, and from_cache() rebuilds a working
     facade from disk alone — no store connection is opened for dims, vendor
     id resolution, 'latest' (frozen to the set's as-of date), or any covered
-    request. Only a request outside coverage may fall through."""
+    request. Only a request outside coverage may fall through.
+
+    Staleness at the offline boundary: with a store reachable, a stale set
+    is dismissed and the session starts store-backed with an empty cache
+    (same contract as load_cache); genuinely offline there is nothing to
+    re-query, so a stale set raises unless max_age_days=None accepts it."""
     os.environ["FACTOR_CACHE_DIR"] = str(Path(root) / "offlinebase")
     try:
         a = ModelFacade.load(MID, str(root), output="polars",
@@ -688,9 +937,38 @@ def check_from_cache_offline(root):
             c = ModelFacade.from_cache(MID, output="polars")
             c.get_factor_returns(DATES[0], DATES[-1])
             assert c.cache.stats["hits"] == 1
+
+            # stale set, genuinely offline: nothing to re-query → raises;
+            # max_age_days=None knowingly accepts the old set
+            import json as _json
+            import warnings as _warnings
+            mpath = saved / "manifest.json"
+            m = _json.loads(mpath.read_text())
+            m["meta"]["saved_at"] = "2020-01-01T00:00:00+00:00"
+            mpath.write_text(_json.dumps(m))
+            try:
+                ModelFacade.from_cache(MID, output="polars")
+                raise AssertionError("stale set accepted offline")
+            except ValueError as e:
+                assert "no store" in str(e)
+            d = ModelFacade.from_cache(MID, output="polars",
+                                       max_age_days=None)
+            d.get_factor_returns(DATES[0], DATES[-1])
+            assert d.cache.stats["hits"] == 1
         finally:
             if prior is not None:
                 os.environ["FACTOR_STORE_ROOT"] = prior
+
+        # stale set with a store reachable: dismissed — the session starts
+        # store-backed with an empty cache and rebuilds on demand
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            e_fac = ModelFacade.from_cache(MID, str(root), output="polars")
+        assert any("dismissed" in str(w.message) for w in caught)
+        assert e_fac.cache.frames == {}                  # empty, store-backed
+        out = e_fac.get_factor_loadings("latest", assets=[1])
+        assert out["asset_id"].to_list() == [1]          # re-queried
+        assert e_fac.cache.stats["misses"] == 1
     finally:
         del os.environ["FACTOR_CACHE_DIR"]
 
@@ -775,6 +1053,8 @@ CHECKS = [
     ("facade: T0 estimate stream via the type column", check_t0_estimates),
     ("facade: security panel + date-range loadings", check_panel_and_history),
     ("facade: cache off by default; opt-in pre-warm serves covered subsets", check_cache_prewarm),
+    ("facade: cache extend-on-demand merges misses into the working set", check_cache_extend),
+    ("cache: view identity (official vs estimate) + per-cell fresh-wins dedupe", check_cache_view_identity),
     ("facade: cache persists to parquet, reloads across sessions", check_cache_persistence),
     ("facade: from_cache cold-starts offline, zero store contact", check_from_cache_offline),
     ("inventory: static model inventory matches ids and store schema", check_inventory),

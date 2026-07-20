@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import warnings
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -166,13 +167,14 @@ class ModelFacade:
 
     def _loadings_long(self, lo: date, hi: date, ids, factors) -> pl.DataFrame:
         """Sparse long-form loadings over [lo, hi], via the cache."""
-        if lo == hi:
-            loader = lambda: self._model.factor_loadings(
-                lo, assets=ids, factors=factors)
-        else:
-            loader = lambda: self._model.loading_history(
-                lo, hi, assets=ids, factors=factors)
-        long = self.cache.get("factor_loading", lo, hi, ids, loader)
+        loader = lambda s, e, a: (
+            self._model.factor_loadings(s, assets=a, factors=factors)
+            if s == e else
+            self._model.loading_history(s, e, assets=a, factors=factors))
+        # a factor-filtered load is not cache-shaped (cache holds all
+        # factors) — serve it from coverage when possible, never merge it
+        long = self.cache.get("factor_loading", lo, hi, ids, loader,
+                              extendable=factors is None)
         if factors is not None:                       # cache holds all factors
             long = long.filter(pl.col(FACTOR_ID).is_in(list(factors)))
         return long
@@ -269,7 +271,8 @@ class ModelFacade:
         if "specific_risk" in fields:
             srisk = self.cache.get(
                 "specific_risk", lo, hi, ids,
-                lambda: self._model.specific_risk_history(lo, hi, assets=ids))
+                lambda s, e, a: self._model.specific_risk_history(s, e,
+                                                                  assets=a))
             legs.append(self._scale(srisk, "specific_risk",
                                     self._model.conventions
                                     ["specific_risk_convention"])
@@ -278,7 +281,7 @@ class ModelFacade:
         if "returns" in fields:
             rets = self.cache.get(
                 "asset_return", lo, hi, ids,
-                lambda: self._model.asset_returns(lo, hi, assets=ids))
+                lambda s, e, a: self._model.asset_returns(s, e, assets=a))
             legs.append(self._scale(rets, "return",
                                     self._model.conventions
                                     ["return_convention"])
@@ -311,7 +314,7 @@ class ModelFacade:
         ids = self._resolve_assets(assets, sec_id_type)
         raw = self.cache.get(
             "specific_risk", cob, cob, ids,
-            lambda: self._model.specific_risk(cob, assets=ids))
+            lambda s, e, a: self._model.specific_risk(s, assets=a))
         return self._out(self._scale(
             raw, "specific_risk",
             self._model.conventions["specific_risk_convention"]))
@@ -340,12 +343,18 @@ class ModelFacade:
         lo = self._as_date(start, "start") if start else self._as_date("latest")
         hi = self._as_date(end, "end") if end else lo
         if estimates:
+            # estimates bypass the cache (their value is freshness). If
+            # they are ever cached, they must carry view="t0_estimate" —
+            # the cache keys frames per view, so they could never be
+            # served as official either way.
             raw = self._model.factor_returns(lo, hi, factors=factors,
                                              pub_type=T0_ESTIMATE)
         else:
             raw = self.cache.get(
                 "factor_return", lo, hi, None,
-                lambda: self._model.factor_returns(lo, hi, factors=factors))
+                lambda s, e, a: self._model.factor_returns(s, e,
+                                                           factors=factors),
+                extendable=factors is None)
         if factors is not None:
             raw = raw.filter(pl.col(FACTOR_ID).is_in(list(factors)))
         return self._out(self._scale(
@@ -421,7 +430,7 @@ class ModelFacade:
         return Path(base).expanduser() / "usercache"
 
     def _coverage_end(self) -> date:
-        ends = [c.end for c in self.cache.coverage.values()]
+        ends = [c.end for segs in self.cache.coverage.values() for c in segs]
         if not ends:
             raise ValueError("nothing warmed — call warm() before save_cache()")
         return max(ends)
@@ -466,10 +475,13 @@ class ModelFacade:
         """Adopt a working set saved by ``save_cache()``.
 
         Saved sets carry a TTL: the pre-warm pattern is a refresh every
-        morning, so by default a set more than a day old refuses to load
-        (re-warm, or pass ``max_age_days=None`` to accept it knowingly).
-        Data is frozen as of its key date either way — ``clear()`` and
-        re-warm on a known restatement.
+        morning. A stale or missing set is **not an error** (Chris,
+        2026-07-20 — the cache should be dismissed and the data
+        re-queried): the facade warns, starts with a fresh empty cache,
+        and requests fall through to the store, where extend-on-demand
+        rebuilds the set organically. Pass ``max_age_days=None`` to
+        knowingly adopt an older set. Data is frozen as of its key date
+        either way — ``clear()`` and re-warm on a known restatement.
 
         Args:
             path: Exact directory (bypasses key resolution).
@@ -479,39 +491,57 @@ class ModelFacade:
                 written; ``None`` disables the check.
 
         Returns:
-            Cache stats (counters start at zero for the new session).
+            Cache stats plus ``"adopted"`` (bool) and ``"dismissed"``
+            (``None``, ``"missing"``, or the staleness description).
 
         Raises:
-            FileNotFoundError: No saved set for this model.
-            ValueError: The set was saved for a different model, or is
-                older than ``max_age_days``.
+            FileNotFoundError: An explicitly given ``path`` has no set —
+                a caller error, unlike keyed resolution finding nothing.
+            ValueError: The set was saved for a different model.
         """
-        target = self._resolve_saved(self.model_id, path, as_of)
-        cache, meta = UserCache.from_disk(target)
+        try:
+            target = self._resolve_saved(self.model_id, path, as_of)
+            cache, meta = UserCache.from_disk(target)
+        except FileNotFoundError:
+            if path is not None:
+                raise                          # explicit path: caller error
+            warnings.warn(
+                f"no saved working set for {self.model_id} — starting with "
+                "an empty cache; data will be queried from the store",
+                stacklevel=2)
+            self.cache = UserCache()
+            return {**self.cache.stats, "adopted": False,
+                    "dismissed": "missing"}
         saved_for = meta.get("model_id")
         if saved_for != self.model_id:
             raise ValueError(f"cached working set was saved for {saved_for!r},"
                              f" this facade is {self.model_id!r}")
-        self._check_set_age(meta, max_age_days, target)
+        stale = self._set_staleness(meta, max_age_days)
+        if stale:
+            warnings.warn(
+                f"dismissed working set at {target}: {stale} — starting "
+                "with an empty cache; re-warm, or pass max_age_days=None "
+                "to accept the older set", stacklevel=2)
+            self.cache = UserCache()
+            return {**self.cache.stats, "adopted": False, "dismissed": stale}
         self.cache = cache
-        return self.cache.stats
+        return {**self.cache.stats, "adopted": True, "dismissed": None}
 
     @staticmethod
-    def _check_set_age(meta: dict, max_age_days: float | None,
-                       target: Path) -> None:
-        """TTL gate for a saved working set (skipped for sets predating the
-        saved_at stamp — age unknown beats unusable)."""
+    def _set_staleness(meta: dict, max_age_days: float | None) -> str | None:
+        """Age description if the saved set exceeds the TTL, else None
+        (skipped for sets predating the saved_at stamp — age unknown
+        beats unusable)."""
         if max_age_days is None or not meta.get("saved_at"):
-            return
+            return None
         saved_at = datetime.fromisoformat(meta["saved_at"])
         if saved_at.tzinfo is None:            # foreign writer: assume UTC
             saved_at = saved_at.replace(tzinfo=timezone.utc)
         age = datetime.now(timezone.utc) - saved_at
         if age.total_seconds() > max_age_days * 86400:
-            raise ValueError(
-                f"working set at {target} is {age.days}d "
-                f"{age.seconds // 3600}h old (TTL {max_age_days}d) — re-warm "
-                "and save_cache(), or pass max_age_days=None to accept it")
+            return (f"{age.days}d {age.seconds // 3600}h old "
+                    f"(TTL {max_age_days}d)")
+        return None
 
     @classmethod
     def _resolve_saved(cls, model_id: str, path=None, as_of=None) -> Path:
@@ -545,8 +575,12 @@ class ModelFacade:
         falls outside the cached coverage and has to fall through.
         ``'latest'`` resolves to the set's as-of date; data is frozen as
         of that date, so re-warm when it is older than your questions.
-        Like ``load_cache()``, a set older than ``max_age_days`` (default
-        1 day — the morning-refresh TTL) refuses to load.
+        Like ``load_cache()``, a stale or missing set is dismissed rather
+        than raised **when a store is reachable**: the session starts
+        store-backed with an empty cache and rebuilds on demand. On a
+        genuinely offline machine there is nothing to re-query, so a stale
+        set still raises — pass ``max_age_days=None`` to knowingly accept
+        it.
 
         Args:
             model_id: Model the set was saved for.
@@ -558,18 +592,39 @@ class ModelFacade:
             max_age_days: TTL for the saved set; ``None`` disables.
 
         Raises:
-            FileNotFoundError: No saved set, or one without dimension
-                tables (saved before dims were persisted — re-warm).
+            FileNotFoundError: An explicitly given ``path`` has no set; no
+                set exists and no store is reachable; or the set has no
+                dimension tables (saved before dims were persisted).
             ValueError: The set was saved for a different model, or is
-                older than ``max_age_days``.
+                stale on an offline machine (nothing to re-query).
         """
-        target = cls._resolve_saved(model_id, path, as_of)
-        cache, meta = UserCache.from_disk(target)
+        store_reachable = (root is not None
+                           or bool(os.environ.get("FACTOR_STORE_ROOT")))
+        try:
+            target = cls._resolve_saved(model_id, path, as_of)
+            cache, meta = UserCache.from_disk(target)
+        except FileNotFoundError:
+            if path is not None or not store_reachable:
+                raise
+            warnings.warn(
+                f"no saved working set for {model_id} — starting a "
+                "store-backed session with an empty cache", stacklevel=2)
+            return cls.load(model_id, root, output=output, cache=UserCache())
         saved_for = meta.get("model_id")
         if saved_for != model_id:
             raise ValueError(f"cached working set was saved for {saved_for!r},"
                              f" requested {model_id!r}")
-        cls._check_set_age(meta, max_age_days, target)
+        stale = cls._set_staleness(meta, max_age_days)
+        if stale:
+            if not store_reachable:
+                raise ValueError(
+                    f"working set at {target} is {stale} and no store is "
+                    "configured to re-query — re-warm on a connected "
+                    "machine, or pass max_age_days=None to accept it")
+            warnings.warn(
+                f"dismissed working set at {target}: {stale} — starting a "
+                "store-backed session with an empty cache", stacklevel=2)
+            return cls.load(model_id, root, output=output, cache=UserCache())
         if root is None and not os.environ.get("FACTOR_STORE_ROOT"):
             # genuinely offline machine: fine for covered sessions — only a
             # request outside the saved coverage needs a store, and this
@@ -586,5 +641,6 @@ class ModelFacade:
         fac = cls(Model(store, model_id), cache=cache, output=output)
         fac._frozen_latest = (date.fromisoformat(meta["as_of"])
                               if meta.get("as_of")
-                              else max(c.end for c in cache.coverage.values()))
+                              else max(c.end for segs in cache.coverage.values()
+                                       for c in segs))
         return fac
