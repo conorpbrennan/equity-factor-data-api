@@ -102,22 +102,30 @@
   <div class="tablewrap"><table>
     <thead><tr><th>class</th><th class="l">role</th><th class="l">behaviour</th></tr></thead>
     <tbody>
+      <tr><td class="mono">CacheBehaviour</td><td class="l">the miss policy</td>
+          <td class="l">EXTEND (default): a miss is queried once and merged into the set; STRICT: serve only declared coverage, never mutate</td></tr>
       <tr><td class="mono">Coverage</td><td class="l">declaration</td>
-          <td class="l">start, end, frozenset of assets (None = all) per dataset</td></tr>
+          <td class="l">a segment: start, end, frozenset of assets (None = all); each dataset holds a <em>list</em> of segments — the warmed rectangle plus whatever the session accreted</td></tr>
       <tr><td class="mono">NoCache</td><td class="l">the default</td>
           <td class="l">get() always runs the loader; put() raises rather than silently no-op; stats all zero</td></tr>
       <tr><td class="mono">UserCache</td><td class="l">the opt-in</td>
-          <td class="l">coverage test, filtered serve on hit, fall-through on miss, hit/miss counters, clear(), parquet persistence</td></tr>
+          <td class="l">coverage test over segment unions, filtered serve on hit, gap-only fetches on miss (EXTEND), hit/miss counters, clear(), parquet persistence</td></tr>
     </tbody>
   </table></div>
   <p>
     <strong>Caching is off by default</strong> (settled 2026-07-15). The facade constructor does
     <span class="mono">self.cache = cache if cache is not None else NoCache()</span> — the
-    speed-versus-staleness trade-off is always the caller's, never a default. The coverage test is
-    containment: the cached range must contain the requested range <em>and</em> the requested
-    assets must be a subset of covered assets. A hit filters the warmed frame by
-    <span class="mono">COB_DATE.is_between(start, end)</span> and asset membership; a miss runs the
-    loader in full.
+    speed-versus-staleness trade-off is always the caller's, never a default. A request is a hit
+    when every requested (date × asset) cell is covered by the segment union; a hit filters the
+    working set by <span class="mono">COB_DATE.is_between(start, end)</span> and asset membership.
+    On a miss under EXTEND, loaders being gap-aware (<span class="mono">loader(s, e, assets)</span>)
+    means <strong>only the missing cells travel</strong>: extending a warmed range by a week loads
+    a week; asking about the warmed book plus two new names loads the two names (missing assets
+    are grouped by their gap ranges — one fetch per group, degrading to one full-request load
+    beyond a small cap, because round trips have fixed latency). The cache identity also carries
+    the <strong>publication view</strong> (<span class="mono">view="official"</span> by default;
+    any other view keys its own frames as <span class="mono">dataset@view</span>) — see the
+    resolved callout below.
   </p>
 
   <h3>1.3 &nbsp;Warm, persist, cold-start — the daily lifecycle</h3>
@@ -143,8 +151,12 @@ cache.clear()                              # known restatement: drop the set, re
     <li><span class="mono">from_cache()</span> starts a session entirely from the persisted set —
         offline cold start. <span class="mono">'latest'</span> resolves to the set's as-of date.</li>
     <li>The <strong>1-day TTL</strong> (<span class="mono">max_age_days=1.0</span>) enforces the
-        morning re-warm cadence; <span class="mono">max_age_days=None</span> is the explicit
-        opt-out for knowingly using an older set.</li>
+        morning re-warm cadence. A stale or missing set is <strong>dismissed, not raised</strong>
+        (Chris, 20 July): the facade warns, starts with an empty cache, and re-queries the store
+        as requests arrive — extend-on-demand rebuilds the set organically.
+        <span class="mono">max_age_days=None</span> is the explicit opt-out for knowingly using an
+        older set, and <span class="mono">from_cache()</span> still raises when genuinely offline —
+        the one place there is nothing to re-query.</li>
     <li><span class="mono">clear()</span> invalidates the whole working set but keeps the session
         hit/miss counters — the counters describe the session, not the set.</li>
     <li><span class="mono">warm_cache.py</span> is the cron-ready morning job: repeatable
@@ -165,11 +177,13 @@ cache.clear()                              # known restatement: drop the set, re
     (UTC) in <span class="mono">manifest.json</span>. When a later session adopts the set via
     <span class="mono">load_cache()</span> or <span class="mono">from_cache()</span>, the facade
     compares <span class="mono">now − saved_at</span> against
-    <span class="mono">max_age_days</span> and <strong>raises a
-    <span class="mono">ValueError</span></strong> if the set is older — it cannot silently hand
-    you Tuesday's data on Thursday. <span class="mono">max_age_days=None</span> skips the check
-    for when an older set is knowingly acceptable (offline for a few days with last Friday's
-    snapshot).
+    <span class="mono">max_age_days</span> and <strong>dismisses the set</strong> if it is older —
+    a warning, an empty cache, and live re-querying, never Tuesday's data silently served on
+    Thursday (per Chris's 20 July note: dismissed and re-queried, not raised).
+    <span class="mono">max_age_days=None</span> skips the check for when an older set is knowingly
+    acceptable (offline for a few days with last Friday's snapshot — offline is also the one case
+    where <span class="mono">from_cache()</span> still raises on staleness, since there is no
+    store to re-query).
   </p>
   <p>
     <strong>The next-day load does not extend the previous set by one day — the set is rebuilt
@@ -184,21 +198,25 @@ cache.clear()                              # known restatement: drop the set, re
   <p>
     The incremental version — load yesterday's set, pull only the new COB date, extend coverage
     by one day — is exactly Chris's <em>fetch-missing-days-and-merge</em> idea (§3.2), and it is
-    <strong>not built</strong>. It would make the morning job much cheaper, but note the
-    correctness trap it must clear first: <strong>an append-only warm never picks up
-    restatements to earlier dates</strong>, whereas the full daily rebuild gets them for free.
-    A delta-warm therefore needs the restatement story to be solid before it ships —
-    <span class="mono">as_of</span>/status in the cache key, and <span class="mono">clear()</span>
-    on known restatements as the escape hatch.
+    <strong>now built</strong> as extend-on-demand: adopt yesterday's set, ask today's question,
+    and only the new day's cells are fetched and merged. The morning full re-warm remains the
+    stated cadence (wipe and recreate — §3.1); extension handles the intra-day drift between
+    warm-time and request-time. The append-only correctness trap flagged here previously —
+    <strong>an append-only warm never picks up restatements to earlier dates</strong> — is
+    mitigated on three fronts: the daily wipe bounds the exposure, merges dedupe per cell with
+    freshly loaded rows winning (a re-fetched republication replaces the stale row), and the
+    view identity below keeps point-in-time answers out of the latest-official frames entirely.
+    <span class="mono">clear()</span> remains the explicit escape on a known restatement.
   </p>
 
   <div class="callout">
-    <p><span class="h">One known gap.</span>
-    The persisted-set path is keyed by (as-of date, model_id), but the in-memory key is dataset
-    name + coverage only — nothing in it records <em>which as-of view</em> a frame was loaded
-    under, or whether it is official data versus a T0 estimate. That is safe today only because a
-    cache instance ever holds one view: <span class="mono">warm()</span> loads latest-official,
-    and estimates bypass the cache entirely.</p>
+    <p><span class="h">A gap, now closed — kept here because the worked example is the clearest
+    statement of the requirement.</span>
+    As first written, the in-memory key was dataset name + coverage only — nothing recorded
+    <em>which as-of view</em> a frame was loaded under, or whether it was official data versus a
+    T0 estimate. That was safe only because a cache instance ever held one view:
+    <span class="mono">warm()</span> loads latest-official, and estimates bypass the cache
+    entirely.</p>
     <p><span class="h">Worked example of the failure.</span> Loadings for March&nbsp;15 are
     restated by the vendor on April&nbsp;2. You warm on April&nbsp;10, so the cached frame holds
     the <em>restated</em> March&nbsp;15 values — that is what "latest" means on April&nbsp;10.
@@ -209,12 +227,15 @@ cache.clear()                              # known restatement: drop the set, re
     answer is the pre-restatement ones. Silently wrong, dressed as a fast success: the coverage
     test cannot catch it, because the requested <em>date</em> genuinely is covered — what differs
     is the as-of view, and that is not part of the key.</p>
-    <p><strong>The fix: make the view part of the identity.</strong> The cache key must grow
-    <span class="mono">as_of</span>/status the moment restatement queries are exposed — then the
-    PIT query above is a clean <em>miss</em> that falls through to the loader, which is the
-    correct behaviour. This is a firm requirement whichever cache design wins, because every
-    shape has the same hole if identity is incomplete: the working set's coverage key, the
-    decorator's <span class="mono">__cache_identity__</span> (Chris's proposal lists model, variant,
+    <p><strong>The fix — implemented: the view is part of the identity.</strong>
+    <span class="mono">get()</span>/<span class="mono">put()</span> carry
+    <span class="mono">view="official"</span> by default, and any other view — an estimate
+    stream, a PIT as-of — keys its own frames and coverage as
+    <span class="mono">dataset@view</span>. The PIT query above is now a clean <em>miss</em> that
+    falls through to the loader, structurally: not a convention callers must remember, but a
+    different key. Persisted sets round-trip every view unchanged. The same completeness
+    requirement still binds the other cache shapes: the decorator's
+    <span class="mono">__cache_identity__</span> (Chris's proposal lists model, variant,
     <span class="mono">as_of</span>, status explicitly), and the SHA-256 request hash in §4 — a
     request is not fully specified without <span class="mono">as_of</span>, so it is not
     replayable without it.</p>
@@ -278,7 +299,8 @@ cache.clear()                              # known restatement: drop the set, re
     Restatements are infrequent, so a same-day cache is fine in most cases; a use case that needs
     fresher data <strong>bypasses</strong> the cache; a known restatement clears and re-warms.
     <em>Status: all implemented — the TTL, the clear, the bypass (estimates), and the morning
-    warm job.</em>
+    warm job; and, per his 20 July follow-up, a stale or missing set is now dismissed and
+    re-queried rather than raised (§1.4).</em>
   </p>
   <p>
     Chris has since sharpened the intent: user caches are deliberately
@@ -294,13 +316,15 @@ cache.clear()                              # known restatement: drop the set, re
         speed-versus-freshness trade-off. <em>Implemented.</em></li>
     <li><strong>Key includes model, variant, as_of, status</strong> — a point-in-time query never
         gets a later restatement; T0 estimates are never served as official data.
-        <em>Partly implemented: estimates are excluded by bypass, and the persisted path carries
-        (as_of, model); as_of/status in the in-memory key is the open item from §1.</em></li>
+        <em>Implemented: the cache identity carries the publication view
+        (<span class="mono">dataset@view</span>) — see the resolved callout in §1 — on top of the
+        estimates bypass and the persisted (as_of, model) path key.</em></li>
     <li><strong>Date-range requests fetch only the missing days and merge them in.</strong>
-        <em>Not implemented: today's coverage test is all-or-nothing — a request partly outside
-        coverage falls through in full. Fetch-and-merge is a natural extension of the coverage
-        model — though the short-lived philosophy in §3.1 weakens the case for it: a set that is
-        wiped and rebuilt daily has little to merge into.</em></li>
+        <em>Implemented as extend-on-demand (CacheBehaviour.EXTEND, the default), and further
+        than asked: gap-only fetches on both axes — missing days AND missing assets, grouped by
+        gap signature. Chris was right to push back on an earlier draft's claim that the
+        short-lived philosophy weakened the case for this: lifetime (wipe daily) and
+        intra-day mutability (extend on demand) are independent axes, and they compose.</em></li>
   </ul>
   <h3>3.3 &nbsp;Reusable design</h3>
   <p>
@@ -472,9 +496,9 @@ cache.clear()                              # known restatement: drop the set, re
   <div class="tablewrap"><table>
     <thead><tr><th>shape</th><th class="l">caches</th><th class="l">lives at</th><th class="l">unique payoff</th><th class="l">status</th></tr></thead>
     <tbody>
-      <tr><td class="l">Working set</td><td class="l">declared coverage per dataset</td>
-          <td class="l">facade</td><td class="l">morning warm, offline cold start, covered-subset serving</td>
-          <td class="l">built</td></tr>
+      <tr><td class="l">Working set</td><td class="l">declared + accreted coverage per dataset and view</td>
+          <td class="l">facade</td><td class="l">morning warm, offline cold start, extend-on-demand with gap-only fetches</td>
+          <td class="l">built (incl. Strict/Extend, 2-D fetch-the-gap, view identity, dismiss-stale)</td></tr>
       <tr><td class="l">Record &amp; playback</td><td class="l">exact request → response pairs</td>
           <td class="l">DataSource boundary</td><td class="l">regression fixtures, infra-free reruns, server-ready contract</td>
           <td class="l">proposed</td></tr>
@@ -496,9 +520,9 @@ cache.clear()                              # known restatement: drop the set, re
     <p>· Opt-in, off by default — settled, keep it.</p>
     <p>· A canonical, versioned JSON request schema — required for the SHA-256 key, and the
        future service contract for free.</p>
-    <p>· <span class="mono">as_of</span>/status in the cache identity everywhere — the working-set
-       key gap (§1) and the request hash both need it; PIT answers must never see a later
-       republication, and T0 estimates must never replay as official.</p>
+    <p>· <span class="mono">as_of</span>/status in the cache identity everywhere — done for the
+       working set (the view key, §1); still required of the request hash: PIT answers must
+       never see a later republication, and T0 estimates must never replay as official.</p>
     <p>· Explicit invalidation as a deliberate act — <span class="mono">clear()</span> +
        re-warm for the working set, force re-record for the fixture store; both auditable.</p>
   </div>
@@ -523,10 +547,10 @@ cache.clear()                              # known restatement: drop the set, re
         baseline needs a deliberate re-record.</li>
     <li><strong>One model regression wired to fixtures end-to-end</strong> as the proof — record
         a session, replay it in CI with no store, no engine, no network.</li>
-    <li><strong><span class="mono">as_of</span>/status into both identities while there.</strong>
-        A request is not replayable unless its identity is complete, so record &amp; playback is
-        a natural forcing function for the PIT-correctness requirement in §1 — close the
-        working-set key gap in the same change.</li>
+    <li><strong><span class="mono">as_of</span>/status into the request schema.</strong>
+        A request is not replayable unless its identity is complete — the same completeness
+        requirement the working set now enforces via the view key (§1, done); the request hash
+        needs it from day one.</li>
   </ul>
   <h3>6.2 &nbsp;Where the real work is: canonicalization</h3>
   <p>
@@ -551,13 +575,10 @@ cache.clear()                              # known restatement: drop the set, re
   </ul>
   <h3>6.4 &nbsp;Defer</h3>
   <p>
-    The missing-days fetch-and-merge (§3.2) and the generic
-    <span class="mono">@cached_dataframe</span> layer (§3.3) both wait until something concrete
-    demands them — the merge until partial-coverage misses show up in practice (and not before
-    the restatement story is solid — see the append-only trap in §1.4; note too that the
-    short-lived cache philosophy in §3.1 may mean it is never needed), the decorator
-    until a second data class asks for caching. Both are mechanical extensions of seams that
-    already exist; neither blocks anything above.
+    The generic <span class="mono">@cached_dataframe</span> layer (§3.3) waits until a second
+    data class asks for caching — a mechanical extension of a seam that already exists, blocking
+    nothing above. (Fetch-and-merge, deferred in an earlier draft of this section, is now built —
+    §3.2.)
   </p>
   <div class="callout">
     <p><span class="h">Positioning note.</span> Record &amp; playback sidesteps the

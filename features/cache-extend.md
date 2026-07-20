@@ -10,6 +10,7 @@
 
 
 
+
 - python_src/modelfacade/README.md
 - python_src/modelfacade/__init__.py
 - python_src/modelfacade/cache.py
@@ -17,6 +18,12 @@
 - python_src/modelfacade/selftest.py
 
 ## History
+
+- 2026-07-20 `c75532f` — cache: view identity in the cache key + per-cell fresh-wins dedupe
+  - python_src/modelfacade/README.md
+  - python_src/modelfacade/cache.py
+  - python_src/modelfacade/facade.py
+  - python_src/modelfacade/selftest.py
 
 - 2026-07-20 `68b8a53` — facade: dismiss stale/missing working sets instead of raising
   - python_src/modelfacade/README.md
