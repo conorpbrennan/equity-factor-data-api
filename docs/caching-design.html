@@ -280,6 +280,14 @@ cache.clear()                              # known restatement: drop the set, re
     <em>Status: all implemented — the TTL, the clear, the bypass (estimates), and the morning
     warm job.</em>
   </p>
+  <p>
+    Chris has since sharpened the intent: user caches are deliberately
+    <strong>short-lived</strong>. Pre-warm in the morning, rely on the set during the day, and the
+    next morning it is <em>wiped and recreated</em>; a research project might keep a set for two
+    or three days, then refresh. The longer a cache lives, the bigger the risk of
+    inconsistencies. This is a direct endorsement of the full daily rebuild described in §1.4 —
+    freshness by wipe-and-rebuild, not by patching.
+  </p>
   <h3>3.2 &nbsp;Cache semantics</h3>
   <ul>
     <li><strong>Opt-in, caller-controlled</strong> — off by default; the caller owns the
@@ -291,7 +299,8 @@ cache.clear()                              # known restatement: drop the set, re
     <li><strong>Date-range requests fetch only the missing days and merge them in.</strong>
         <em>Not implemented: today's coverage test is all-or-nothing — a request partly outside
         coverage falls through in full. Fetch-and-merge is a natural extension of the coverage
-        model.</em></li>
+        model — though the short-lived philosophy in §3.1 weakens the case for it: a set that is
+        wiped and rebuilt daily has little to merge into.</em></li>
   </ul>
   <h3>3.3 &nbsp;Reusable design</h3>
   <p>
@@ -350,6 +359,14 @@ cache.clear()                              # known restatement: drop the set, re
         the same property the persisted working set already has, generalized to arbitrary
         requests.</li>
   </ul>
+  <p>
+    One limitation is by design and worth stating plainly: the exact-match key treats dates as
+    ordinary parameters. Request the same range twice and you hit; request an
+    overlapping-but-different range and you miss, even though the shared dates would answer
+    identically. That is precisely what makes the key bulletproof — there is no clever reuse
+    logic to get wrong — and it is why record &amp; playback does not replace the working set:
+    range reuse is the working set's job (§5).
+  </p>
   <pre># request → canonical JSON → SHA-256 → paired files
 {"fact": "factor_loading", "model_id": "AX_WW4_MH",
  "start": "2026-01-01", "end": "2026-06-30",
@@ -371,6 +388,17 @@ cache.clear()                              # known restatement: drop the set, re
         up to 159× slower remote).</li>
     <li>Force re-record as the deliberate, auditable act of refreshing the baseline — the diff of
         the <span class="mono">.request</span> files documents exactly what changed.</li>
+    <li><strong>Outputs are captured too.</strong> A recorded run stores not only the input
+        pairs at the sourcing boundary but the app's own outputs — DataFrame to parquet — as the
+        baseline. A regression run then replays the recorded inputs through the current code and
+        compares the freshly generated outputs against the captured ones.</li>
+    <li>That output comparison is a defined <strong>equivalence</strong> — tolerance-based
+        numeric comparison, not byte-equality of parquet — so a baseline diff distinguishes real
+        regressions from benign noise. Both the equivalence and the replay wiring are part of
+        the harness, in the main repo (§4.4).</li>
+    <li><strong>Reproducibility</strong> as a first-class property: the same code replayed on the
+        same fixtures gives the same numbers, for everyone — serving a goal QDS already holds,
+        that two people running the same code must never end up with different numbers.</li>
   </ul>
   <h3>4.3 &nbsp;DataInterface — one choke point for all sourcing</h3>
   <p>
@@ -393,7 +421,8 @@ cache.clear()                              # known restatement: drop the set, re
   <h3>4.4 &nbsp;Fixture housing — a separate repo, fixed dates only</h3>
   <p>
     Recorded fixtures live in <strong>their own git repository</strong>, holding only
-    <strong>fixed-date</strong> request/response pairs for regression testing. This carries one
+    <strong>fixed-date</strong> recordings for regression testing — the input pairs at the
+    sourcing boundary and the captured output baselines they should reproduce. This carries one
     canonicalization rule with it: recorded requests contain <strong>absolute dates only</strong> —
     <span class="mono">'latest'</span> or any relative as-of resolves to concrete dates
     <em>before</em> hashing, otherwise the same logical request hashes differently every day and
@@ -409,12 +438,35 @@ cache.clear()                              # known restatement: drop the set, re
         <strong>(code SHA, fixture SHA)</strong>.</li>
     <li>Fixed-date slices are small — a regression suite's pulls, not the 680&nbsp;GB store —
         so plain git suffices; no LFS needed initially.</li>
-    <li><strong>Data only.</strong> The fixture repo holds request/response pairs and nothing
+    <li><strong>Data only.</strong> The fixture repo holds recorded inputs and captured output
+        baselines and nothing
         else; the replay harness (the <span class="mono">RecordingSource</span> and the test
         wiring that maps fixtures into playback mode) lives in the main repo beside
         <span class="mono">datasource.py</span>. Fixtures stay a pure, tool-agnostic dataset;
         harness changes version with the code they test.</li>
   </ul>
+  <h3>4.5 &nbsp;Precedent — and a lesson on invalidation</h3>
+  <p>
+    The dual-use concept — record at defined points, use the recordings for both caching and
+    testing — has platform-scale precedent: Chris built it into the factor-modelling platform at
+    Citadel as <span class="mono">DataNode</span>s. A data node is a Python class whose function
+    takes DataFrames in and returns one DataFrame out, declaring its dependencies on other nodes
+    so the full computation graph is induced from the last node you ask for; each node could run
+    with a parquet cache. The stored inputs and outputs made regression tests nearly free —
+    store the inputs, store the outputs, run on the stored inputs, compare — two or three lines
+    of Python per test, which got quantitative researchers who hate writing tests to write them.
+    SFM does not need a platform of that scale (Chris's own assessment); the right-sized version
+    is this proposal — the same concept applied at the data-source boundary only.
+  </p>
+  <p>
+    One lesson from that system transfers directly. At Citadel the cache key hashed not only the
+    inputs but <strong>the node's code itself</strong> (comments stripped), so any functional
+    change invalidated the cache. The nuance for us: code-hash invalidation is correct when a
+    recording is used <em>as a cache</em> — serving stale results after a loader change is a
+    bug — but exactly backwards for a <em>regression baseline</em>, where the whole point is
+    replaying old fixtures against new code. That distinction is why the fixture repo is pinned
+    by commit (§4.4), refreshed by deliberate re-record, rather than invalidated by code hash.
+  </p>
 
   <h2><span class="sect">5</span>Synthesis — three shapes, one seam, shared requirements</h2>
   <div class="tablewrap"><table>
@@ -502,7 +554,8 @@ cache.clear()                              # known restatement: drop the set, re
     The missing-days fetch-and-merge (§3.2) and the generic
     <span class="mono">@cached_dataframe</span> layer (§3.3) both wait until something concrete
     demands them — the merge until partial-coverage misses show up in practice (and not before
-    the restatement story is solid — see the append-only trap in §1.4), the decorator
+    the restatement story is solid — see the append-only trap in §1.4; note too that the
+    short-lived cache philosophy in §3.1 may mean it is never needed), the decorator
     until a second data class asks for caching. Both are mechanical extensions of seams that
     already exist; neither blocks anything above.
   </p>
